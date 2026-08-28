@@ -1,0 +1,29 @@
+# Laravel-specific ignores
+.env
+.env.local
+/bootstrap/cache/*
+/storage/*
+!/storage/app/public/.gitignore
+!/bootstrap/cache/.gitignore
+
+# Frontend & Dependencies
+/node_modules/
+/vendor/
+/public/build/
+/public/hot/
+/public/storage
+
+# Logs and OS junk
+*.log
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# IDEs
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
