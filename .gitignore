@@ -1,17 +1,36 @@
-# Laravel-specific ignores
+# Repo-level config
 .env
+.env.*
 .env.local
-/bootstrap/cache/*
-/storage/*
-!/storage/app/public/.gitignore
-!/bootstrap/cache/.gitignore
+.env.backup
+.env.production
+
+# Laravel app root
+app/.env
+app/.env.*
+app/.env.local
+app/.env.backup
+app/.env.production
+app/.phpactor.json
+app/.phpunit.result.cache
+app/.fleet
+app/.idea
+app/.nova
+app/.phpunit.cache
+app/.vscode
+app/.zed
+app/auth.json
+app/bootstrap/cache/*
+app/storage/*
+!app/bootstrap/cache/.gitignore
+!app/storage/app/public/.gitignore
 
 # Frontend & Dependencies
-/node_modules/
-/vendor/
-/public/build/
-/public/hot/
-/public/storage
+app/node_modules/
+app/vendor/
+app/public/build/
+app/public/hot/
+app/public/storage
 
 # Logs and OS junk
 *.log
@@ -27,3 +46,8 @@ docker-compose.override.yml
 *.suo
 *.ntvs*
 *.njsproj
+
+# Database files
+*.sqlite*
+app/storage/*.key
+app/storage/pail
