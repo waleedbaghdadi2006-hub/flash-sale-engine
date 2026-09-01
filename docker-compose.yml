@@ -9,7 +9,7 @@ services:
     container_name: flash-sale-app
     restart: unless-stopped
     working_dir: /app
-    command: ["php-fpm", "-F"]
+    command: [ "php-fpm", "-F" ]
     environment:
       - DB_CONNECTION=mysql
       - DB_HOST=mysql
@@ -23,7 +23,7 @@ services:
       - ./app:/app
       - ./app/storage:/app/storage
     ports:
-      - "9000:9000"
+      - "8000:8000"
     depends_on:
       mysql:
         condition: service_healthy
