@@ -11,69 +11,17 @@ use App\Models\UserToken;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log; // Added for temporary Postman token extraction
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Tymon\JWTAuth\Facades\JWTAuth;
 
-/**
- * ASSUMPTIONS / DEPENDENCIES
- * --------------------------
- * These were not verifiable from AuthController.php or SCHEMA.md alone.
- * Confirm each against the real codebase before deploying.
- *
- * 1. User model casts:
- *    App\Models\User must cast 'locked_until' and 'email_verified_at' to
- *    'datetime' (e.g. via $casts or attribute casting). This code calls
- *    ->isFuture() on $user->locked_until, which requires a Carbon instance,
- *    not a raw string.
- *
- * 2. Unverified users can still obtain a token at registration:
- *    register() issues an access_token + refresh_token immediately, even
- *    though the account is unverified, so the user can use the app right
- *    away. login() on a *later* session, however, is blocked with a 403
- *    until email_verified_at is set. This is a deliberate but debatable
- *    choice — if you want zero access before verification, block token
- *    issuance in register() too.
- *
- * 3. Email delivery is out of scope here:
- *    Two TODOs (register(), forgotPassword()) mark where a Mailable /
- *    Notification must be dispatched with the RAW token. No mailer class
- *    existed in the code I was given, so none was assumed or fabricated.
- *    The raw token is only ever available at the moment issueUserToken()
- *    returns it — only its SHA-256 hash is persisted.
- *
- * 4. Routes are not included:
- *    forgotPassword() and resetPassword() are new methods with no
- *    corresponding routes/*.php entries added, since the routes file
- *    wasn't provided. Wire them up (typically POST /forgot-password and
- *    POST /reset-password).
- *
- * 5. Lockout/token lifetimes are guesses, not requirements:
- *    5 failed attempts -> 15 min lockout, 24h email-verification tokens,
- *    60 min password-reset tokens, 30-day refresh tokens. Adjust the
- *    class constants below to match your actual security policy.
- *
- * 6. UserSession model naming:
- *    The sessions table is mapped to a new App\Models\UserSession model
- *    (not "Session") to avoid colliding with Laravel's built-in Session
- *    facade/class. Update the `use` import if you name it differently.
- *
- */
 class AuthController extends Controller
 {
-    /** Max failed attempts before locking the account. */
     protected const MAX_FAILED_ATTEMPTS = 5;
-
-    /** Lockout duration in minutes once the threshold is hit. */
     protected const LOCKOUT_MINUTES = 15;
-
-    /** Email verification token lifetime in hours. */
     protected const EMAIL_VERIFICATION_TTL_HOURS = 24;
-
-    /** Password reset token lifetime in minutes. */
     protected const PASSWORD_RESET_TTL_MINUTES = 60;
-
-    /** Refresh token (session) lifetime in days. */
     protected const REFRESH_TOKEN_TTL_DAYS = 30;
 
     public function register(RegisterRequest $request): JsonResponse
@@ -95,22 +43,14 @@ class AuthController extends Controller
 
         $verificationToken = $this->issueUserToken($user, 'email_verification', self::EMAIL_VERIFICATION_TTL_HOURS * 60);
 
-        // TODO: dispatch a notification/mailable carrying $verificationToken (the RAW,
-        // unhashed value), e.g.:
-        //   Mail::to($user)->send(new VerifyEmailMail($verificationToken));
-        // Only the SHA-256 hash of this token is persisted in user_tokens, so it
-        // must be captured here — it cannot be recovered later.
+        // Logs the raw string to storage/logs/laravel.log so you can copy it for Postman testing
+        Log::info("NEW USER VERIFICATION TOKEN: " . $verificationToken);
 
-        $token = JWTAuth::fromUser($user);
-        $session = $this->createSession($user, $request);
-
-        return $this->respondWithToken(
-            $token,
-            $session['refresh_token'],
-            $user,
-            'User registered successfully. Please verify your email address.',
-            201
-        );
+        // Returning 201 Created without issuing JWT/Refresh tokens to enforce strict verification
+        return response()->json([
+            'message' => 'User registered successfully. Please check your email for the verification token.',
+            'user' => $user
+        ], 201);
     }
 
     public function login(LoginRequest $request): JsonResponse
@@ -213,8 +153,6 @@ class AuthController extends Controller
             ], 403);
         }
 
-        // Rotate the refresh token: delete the one just used and issue a new one,
-        // so a captured refresh token is only ever usable once.
         $session->delete();
         $newSession = $this->createSession($user, $request);
 
@@ -268,13 +206,10 @@ class AuthController extends Controller
 
         $user = User::where('email', $request->input('email'))->first();
 
-        // Always return the same generic response, whether or not the email
-        // exists, so this endpoint can't be used to enumerate accounts.
         if ($user) {
             $resetToken = $this->issueUserToken($user, 'password_reset', self::PASSWORD_RESET_TTL_MINUTES);
 
-            // TODO: dispatch a notification/mailable carrying $resetToken (raw value).
-            // Only the SHA-256 hash is persisted in user_tokens.
+            Log::info("PASSWORD RESET TOKEN: " . $resetToken);
 
             $this->logAudit($user->id, 'password_reset_requested', 'user', $user->id);
         }
@@ -313,8 +248,6 @@ class AuthController extends Controller
 
         $userToken->update(['used_at' => now()]);
 
-        // Invalidate every active session so a leaked/stolen refresh token
-        // can't survive a password change.
         UserSession::where('user_id', $user->id)->delete();
 
         $this->logAudit($user->id, 'password_reset', 'user', $user->id);
@@ -325,29 +258,26 @@ class AuthController extends Controller
     }
 
     /**
-     * Record a failed login attempt and lock the account once the threshold is hit.
+     * Replaced in-memory attempt counting with atomic increments to prevent race conditions.
      */
     protected function registerFailedLogin(User $user): void
     {
-        $attempts = $user->failed_login_attempts + 1;
+        $user->increment('failed_login_attempts');
+        $user->refresh();
 
-        $update = ['failed_login_attempts' => $attempts];
+        $attempts = $user->failed_login_attempts;
+        $update = [];
 
         if ($attempts >= self::MAX_FAILED_ATTEMPTS) {
             $update['locked_until'] = now()->addMinutes(self::LOCKOUT_MINUTES);
+            $user->update($update);
         }
-
-        $user->update($update);
 
         $this->logAudit($user->id, 'login_failed', 'user', $user->id, null, [
             'failed_login_attempts' => $attempts,
         ]);
     }
 
-    /**
-     * Create and persist a single-use, hashed token row in user_tokens.
-     * Returns the RAW (unhashed) token — this is the only point it's ever available.
-     */
     protected function issueUserToken(User $user, string $type, int $ttlMinutes): string
     {
         $raw = Str::random(64);
@@ -362,10 +292,6 @@ class AuthController extends Controller
         return $raw;
     }
 
-    /**
-     * Create a DB-backed refresh-token session tied to the requesting device.
-     * Returns ['session' => UserSession, 'refresh_token' => raw token string].
-     */
     protected function createSession(User $user, Request $request): array
     {
         $raw = Str::random(64);
@@ -382,9 +308,6 @@ class AuthController extends Controller
         return ['session' => $session, 'refresh_token' => $raw];
     }
 
-    /**
-     * Write a row to audit_logs. $userId may be null for system-initiated actions.
-     */
     protected function logAudit(
         ?int $userId,
         string $action,
