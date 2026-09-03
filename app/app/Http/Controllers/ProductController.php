@@ -7,9 +7,9 @@ use App\Models\Product;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
-use Illuminate\Validation\Rule;
+use App\Http\Requests\UpdateProductRequest;
+use App\Http\Requests\StoreProductRequest;
 
 class ProductController extends Controller
 {
@@ -126,32 +126,12 @@ class ProductController extends Controller
     /**
      * POST /products
      */
-    public function store(Request $request): JsonResponse
+    public function store(StoreProductRequest $request): JsonResponse
     {
-        $validator = Validator::make($request->all(), [
-            'category_id' => ['nullable', 'exists:categories,id'],
-            'name' => ['required', 'string', 'max:255'],
-            'slug' => ['nullable', 'string', 'max:280', 'unique:products,slug'],
-            'description' => ['nullable', 'string'],
-            'base_price' => ['required', 'numeric', 'min:0'],
-            'currency' => ['nullable', 'string', 'size:3'],
-            'sku' => ['required', 'string', 'max:100', 'unique:products,sku'],
-            'is_active' => ['nullable', 'boolean'],
-            'quantity_available' => ['nullable', 'integer', 'min:0'],
-            'images' => ['nullable', 'array'],
-            'images.*.url' => ['required_with:images', 'string', 'max:500'],
-            'images.*.alt_text' => ['nullable', 'string', 'max:255'],
-            'images.*.sort_order' => ['nullable', 'integer', 'min:0'],
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'message' => 'Validation failed.',
-                'errors' => $validator->errors(),
-            ], 422);
-        }
-
-        $data = $validator->validated();
+        // Validation (rules, messages) lives in StoreProductRequest.
+        // Laravel runs it automatically before this method executes and
+        // returns a 422 with the error bag if it fails.
+        $data = $request->validated();
 
         $product = DB::transaction(function () use ($data) {
             $product = Product::create([
@@ -194,7 +174,7 @@ class ProductController extends Controller
     /**
      * PUT/PATCH /products/{id}
      */
-    public function update(Request $request, int $id): JsonResponse
+    public function update(UpdateProductRequest $request, int $id): JsonResponse
     {
         $product = Product::find($id);
 
@@ -204,31 +184,10 @@ class ProductController extends Controller
             ], 404);
         }
 
-        $validator = Validator::make($request->all(), [
-            'category_id' => ['nullable', 'exists:categories,id'],
-            'name' => ['sometimes', 'string', 'max:255'],
-            'slug' => [
-                'sometimes', 'string', 'max:280',
-                Rule::unique('products', 'slug')->ignore($product->id),
-            ],
-            'description' => ['nullable', 'string'],
-            'base_price' => ['sometimes', 'numeric', 'min:0'],
-            'currency' => ['nullable', 'string', 'size:3'],
-            'sku' => [
-                'sometimes', 'string', 'max:100',
-                Rule::unique('products', 'sku')->ignore($product->id),
-            ],
-            'is_active' => ['nullable', 'boolean'],
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'message' => 'Validation failed.',
-                'errors' => $validator->errors(),
-            ], 422);
-        }
-
-        $product->update($validator->validated());
+        // Validation (rules, messages, unique-ignore via route id) lives in
+        // UpdateProductRequest. Laravel runs it automatically before this
+        // method executes and returns a 422 with the error bag if it fails.
+        $product->update($request->validated());
 
         return response()->json(
             $product->fresh(['category', 'images', 'inventory'])

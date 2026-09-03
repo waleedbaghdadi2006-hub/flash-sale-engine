@@ -23,6 +23,6 @@ COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 # Set working directory
 WORKDIR /app
 
-# Expose port 9000 and start php-fpm server
-EXPOSE 9000
+# Expose port 8000 and start php-fpm server
+EXPOSE 8000
 CMD ["php-fpm"]
