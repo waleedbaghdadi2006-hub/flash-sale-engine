@@ -6,9 +6,11 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Product extends Model
 {
+    use SoftDeletes;
     protected $fillable = [
         'category_id',
         'name',
@@ -17,8 +19,7 @@ class Product extends Model
         'base_price',
         'currency',
         'sku',
-        'is_active',
-        'deleted_at',
+        'is_active'
     ];
 
     protected $casts = [

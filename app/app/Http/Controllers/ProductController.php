@@ -38,7 +38,7 @@ class ProductController extends Controller
                 ->orWhere('slug', $categoryParam)
                 ->first();
 
-            if (! $category) {
+            if (!$category) {
                 return response()->json([
                     'message' => 'Category not found.',
                 ], 404);
@@ -106,15 +106,20 @@ class ProductController extends Controller
     /**
      * GET /products/{idOrSlug}
      */
+    /**
+     * GET /products/{idOrSlug}
+     */
     public function show(string $idOrSlug): JsonResponse
     {
         $product = Product::query()
             ->with(['category', 'images', 'inventory'])
-            ->where('id', $idOrSlug)
-            ->orWhere('slug', $idOrSlug)
+            ->where(function ($query) use ($idOrSlug) {
+                $query->where('id', $idOrSlug)
+                    ->orWhere('slug', $idOrSlug);
+            })
             ->first();
 
-        if (! $product) {
+        if (!$product) {
             return response()->json([
                 'message' => 'Product not found.',
             ], 404);
@@ -152,7 +157,7 @@ class ProductController extends Controller
                 'version' => 0,
             ]);
 
-            if (! empty($data['images'])) {
+            if (!empty($data['images'])) {
                 foreach ($data['images'] as $image) {
                     $product->images()->create([
                         'url' => $image['url'],
@@ -178,7 +183,7 @@ class ProductController extends Controller
     {
         $product = Product::find($id);
 
-        if (! $product) {
+        if (!$product) {
             return response()->json([
                 'message' => 'Product not found.',
             ], 404);
@@ -201,9 +206,14 @@ class ProductController extends Controller
      * cart_items reference products with RESTRICT, so hard-deleting a
      * product that has ever been ordered would violate a foreign key.
      */
-    public function destroy(int $id): JsonResponse
+    public function destroy(Request $request, int $id): JsonResponse
     {
-        $product = Product::find($id);
+        $force = $request->boolean('force');
+
+        // If force deleting, search including soft-deleted items
+        $product = $force
+            ? Product::withTrashed()->find($id)
+            : Product::find($id);
 
         if (! $product) {
             return response()->json([
@@ -211,10 +221,47 @@ class ProductController extends Controller
             ], 404);
         }
 
-        $product->delete(); // relies on SoftDeletes trait on the model
+        if ($force) {
+            $product->forceDelete();
+
+            return response()->json([
+                'message' => 'Product permanently deleted.',
+            ]);
+        }
+
+        $product->delete(); // Soft delete
 
         return response()->json([
             'message' => 'Product deleted.',
+        ]);
+    }
+
+    /**
+     * POST /products/{id}/restore
+     *
+     * Restores a soft-deleted product.
+     */
+    public function restore(int $id): JsonResponse
+    {
+        $product = Product::withTrashed()->find($id);
+
+        if (! $product) {
+            return response()->json([
+                'message' => 'Product not found.',
+            ], 404);
+        }
+
+        if (! $product->trashed()) {
+            return response()->json([
+                'message' => 'Product is not deleted.',
+            ], 400);
+        }
+
+        $product->restore();
+
+        return response()->json([
+            'message' => 'Product restored successfully.',
+            'product' => $product->fresh(['category', 'images', 'inventory']),
         ]);
     }
 }

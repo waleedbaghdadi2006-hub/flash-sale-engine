@@ -26,6 +26,35 @@ class FlashSaleItem extends Model
         'quantity_sold' => 'integer',
         'version' => 'integer',
     ];
+    public function remainingStock(): int
+{
+    return $this->quantity_limit - $this->quantity_sold;
+}
+
+/**
+ * Atomically increments quantity_sold if this row's version still
+ * matches what we last read (optimistic lock). Returns false — without
+ * throwing — if another process updated the row first, so the caller
+ * can reload and retry.
+ */
+public function tryReserve(int $quantity): bool
+{
+    $updated = static::query()
+        ->where('id', $this->id)
+        ->where('version', $this->version)
+        ->where('quantity_sold', '<=', $this->quantity_limit - $quantity)
+        ->update([
+            'quantity_sold' => $this->quantity_sold + $quantity,
+            'version' => $this->version + 1,
+        ]);
+
+    if ($updated) {
+        $this->quantity_sold += $quantity;
+        $this->version += 1;
+    }
+
+    return (bool) $updated;
+}
 
     public function flashSale(): BelongsTo
     {

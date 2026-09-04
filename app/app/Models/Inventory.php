@@ -24,6 +24,26 @@ class Inventory extends Model
         'version' => 'integer',
         'last_restocked_at' => 'datetime',
     ];
+    public function tryReserve(int $quantity): bool
+{
+    $updated = static::query()
+        ->where('id', $this->id)
+        ->where('version', $this->version)
+        ->where('quantity_available', '>=', $quantity)
+        ->update([
+            'quantity_available' => $this->quantity_available - $quantity,
+            'quantity_reserved' => $this->quantity_reserved + $quantity,
+            'version' => $this->version + 1,
+        ]);
+
+    if ($updated) {
+        $this->quantity_available -= $quantity;
+        $this->quantity_reserved += $quantity;
+        $this->version += 1;
+    }
+
+    return (bool) $updated;
+}
 
     public function product(): BelongsTo
     {
