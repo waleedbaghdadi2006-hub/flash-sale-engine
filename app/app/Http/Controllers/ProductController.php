@@ -44,8 +44,6 @@ class ProductController extends Controller
                 ], 404);
             }
 
-            // Include the category itself plus any direct children,
-            // since categories are a self-referencing tree.
             $categoryIds = Category::query()
                 ->where('id', $category->id)
                 ->orWhere('parent_id', $category->id)
@@ -61,9 +59,9 @@ class ProductController extends Controller
             $query->where('is_active', true);
         }
 
-        // Simple text search across name and description
-        if ($request->filled('search')) {
-            $term = $request->query('search');
+        // Search across name and description (supports ?q= or ?search=)
+        $term = $request->query('q') ?? $request->query('search');
+        if (!empty($term)) {
             $query->where(function ($q) use ($term) {
                 $q->where('name', 'like', "%{$term}%")
                     ->orWhere('description', 'like', "%{$term}%");
@@ -96,7 +94,7 @@ class ProductController extends Controller
         }
 
         $perPage = (int) $request->query('per_page', 15);
-        $perPage = max(1, min($perPage, 100)); // guard against absurd page sizes
+        $perPage = max(1, min($perPage, 100));
 
         $products = $query->paginate($perPage);
 
@@ -109,10 +107,11 @@ class ProductController extends Controller
     /**
      * GET /products/{idOrSlug}
      */
-    public function show(string $idOrSlug): JsonResponse
+   public function show(string $idOrSlug): JsonResponse
     {
         $product = Product::query()
             ->with(['category', 'images', 'inventory'])
+            ->where('is_active', true)
             ->where(function ($query) use ($idOrSlug) {
                 $query->where('id', $idOrSlug)
                     ->orWhere('slug', $idOrSlug);

@@ -3,223 +3,336 @@
 namespace App\Services;
 
 use App\Exceptions\InsufficientStockException;
-use App\Exceptions\OptimisticLockConflictException;
+use App\Models\Address;
 use App\Models\Cart;
+use App\Models\CartItem;
 use App\Models\Coupon;
-use App\Models\FlashSaleItem;
+use App\Models\Inventory;
 use App\Models\Order;
-use App\Models\Product;
 use App\Models\User;
+use App\Models\FlashSaleItem;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class OrderService
 {
     /**
-     * How many times to retry an attempt after losing an optimistic-lock
-     * race, before giving up and telling the customer to try again.
-     * Flash-sale traffic is exactly the case this exists for.
-     */
-    private const MAX_LOCK_RETRIES = 5;
-
-    /**
-     * Checkout the user's current cart into an order.
+     * Converts an explicit list of line items into an order.
      *
-     * Every line item's stock is decremented under an optimistic lock
-     * (inventory.version) inside a single DB transaction. If any line
-     * loses its lock race, the whole attempt is retried from scratch
-     * (bounded) rather than partially applied.
+     * This is the single place order creation actually happens.[cite: 1]
+     *   - createFromCart()               resolves items from the user's
+     *                                     cart, calls this, then clears
+     *                                     the cart.[cite: 1]
+     *   - CartController::buyNow()       calls this directly with just the
+     *                                     one product/quantity the user
+     *                                     selected — it never touches the
+     *                                     cart at all.[cite: 1]
+     *   - FlashSaleController::purchase() intentionally does NOT go through
+     *     here — flash sale stock is reserved via FlashSaleItem's own
+     *     optimistic lock in a queued job, since it has its own quantity cap
+     *     separate from `inventory`.[cite: 1]
      *
-     * @throws InsufficientStockException
+     * @param array<int, array{product_id:int, quantity:int}> $items
+     *
+     * @throws InsufficientStockException when stock can't cover the items[cite: 1]
+     * @throws \RuntimeException for any other checkout-blocking condition[cite: 1]
+     *         (no items, bad address, bad/expired coupon, etc.)[cite: 1]
      */
-    public function createFromCart(
+    public function createFromItems(
         User $user,
+        array $items,
         int $shippingAddressId,
-        ?int $billingAddressId,
+        ?int $billingAddressId = null,
         ?string $couponCode = null,
     ): Order {
-        $cart = Cart::query()->where('user_id', $user->id)->with('items.product')->first();
+        return DB::transaction(function () use ($user, $items, $shippingAddressId, $billingAddressId, $couponCode) {
+            if (empty($items)) {
+                throw new \RuntimeException('No items to purchase.');
+            }
 
-        if (!$cart || $cart->items->isEmpty()) {
-            throw new \RuntimeException('Your cart is empty.');
-        }
+            $shippingAddress = Address::where('id', $shippingAddressId)
+                ->where('user_id', $user->id)
+                ->first();
 
-        for ($attempt = 0; $attempt < self::MAX_LOCK_RETRIES; $attempt++) {
-            try {
-                return DB::transaction(function () use ($cart, $user, $shippingAddressId, $billingAddressId, $couponCode) {
-                    $subtotal = '0.00';
-                    $lineData = [];
+            if (!$shippingAddress) {
+                throw new \RuntimeException('Invalid shipping address.');
+            }
 
-                    foreach ($cart->items as $cartItem) {
-                        $product = Product::query()->find($cartItem->product_id);
-                        $inventory = $product?->inventory;
+            $billingAddress = null;
+            if ($billingAddressId !== null) {
+                $billingAddress = Address::where('id', $billingAddressId)
+                    ->where('user_id', $user->id)
+                    ->first();
 
-                        if (!$product || !$inventory) {
-                            throw new InsufficientStockException("'{$cartItem->product_id}' is no longer available.");
-                        }
-                        if ($inventory->quantity_available < $cartItem->quantity) {
-                            throw new InsufficientStockException("'{$product->name}' doesn't have enough stock.");
-                        }
+                if (!$billingAddress) {
+                    throw new \RuntimeException('Invalid billing address.');
+                }
+            }
 
-                        $this->decrementInventoryOrConflict($inventory, $cartItem->quantity);
+            $subtotal = 0.0;
+            $orderItemsData = [];
 
-                        $lineTotal = bcmul((string) $cartItem->unit_price_snapshot, (string) $cartItem->quantity, 2);
-                        $subtotal = bcadd($subtotal, $lineTotal, 2);
+            foreach ($items as $item) {
+                $productId = (int) $item['product_id'];
+                $quantity = (int) $item['quantity'];
 
-                        $lineData[] = [
-                            'product_id' => $product->id,
-                            'product_name_snapshot' => $product->name,
-                            'quantity' => $cartItem->quantity,
-                            'unit_price' => $cartItem->unit_price_snapshot,
-                        ];
-                    }
+                if ($quantity < 1) {
+                    throw new \RuntimeException('Item quantity must be at least 1.');
+                }
 
-                    [$discount, $coupon] = $this->applyCoupon($couponCode, $subtotal);
+                $product = \App\Models\Product::where('id', $productId)
+                    ->lockForUpdate()
+                    ->first();
 
-                    // Shipping/tax calculation is intentionally left as a flat
-                    // placeholder here — plug in real rate/tax logic later.
-                    $shippingAmount = '0.00';
-                    $taxAmount = '0.00';
-                    $total = bcsub(bcadd(bcadd($subtotal, $shippingAmount, 2), $taxAmount, 2), $discount, 2);
+                if (!$product || !$product->is_active || $product->trashed()) {
+                    throw new InsufficientStockException(
+                        "A selected product (ID {$productId}) is no longer available."
+                    );
+                }
 
-                    $order = Order::create([
-                        'order_number' => $this->generateOrderNumber(),
-                        'user_id' => $user->id,
-                        'coupon_id' => $coupon?->id,
-                        'shipping_address_id' => $shippingAddressId,
-                        'billing_address_id' => $billingAddressId ?? $shippingAddressId,
-                        'subtotal' => $subtotal,
-                        'discount_amount' => $discount,
-                        'shipping_amount' => $shippingAmount,
-                        'tax_amount' => $taxAmount,
-                        'total_price' => max(0, (float) $total),
-                        'currency' => 'USD',
-                        'status' => 'pending',
+                $inventory = Inventory::where('product_id', $product->id)
+                    ->lockForUpdate()
+                    ->first();
+
+                $available = $inventory->quantity_available ?? 0;
+
+                if (!$inventory || $available < $quantity) {
+                    throw new InsufficientStockException(
+                        "Insufficient stock for \"{$product->name}\" (only {$available} available)."
+                    );
+                }
+
+                $updated = DB::table('inventory')
+                    ->where('id', $inventory->id)
+                    ->where('version', $inventory->version)
+                    ->update([
+                        'quantity_available' => $inventory->quantity_available - $quantity,
+                        'version' => $inventory->version + 1,
+                        'updated_at' => now(),
                     ]);
 
-                    foreach ($lineData as $line) {
-                        $order->items()->create($line);
-                    }
+                if (!$updated) {
+                    throw new InsufficientStockException(
+                        "Stock for \"{$product->name}\" changed while checking out — please try again."
+                    );
+                }
 
-                    if ($coupon) {
-                        $coupon->increment('times_used');
-                    }
+                $unitPrice = (float) $product->base_price;
+                $subtotal += $unitPrice * $quantity;
 
-                    $cart->items()->delete();
-
-                    return $order->load('items');
-                });
-            } catch (OptimisticLockConflictException) {
-                usleep(random_int(10_000, 50_000));
-                continue;
+                $orderItemsData[] = [
+                    'product_id' => $product->id,
+                    'product_name_snapshot' => $product->name,
+                    'quantity' => $quantity,
+                    'unit_price' => $unitPrice,
+                ];
             }
-        }
 
-        throw new InsufficientStockException('Could not reserve stock due to high demand. Please try again.');
+            $coupon = null;
+            $discountAmount = 0.0;
+
+            if ($couponCode !== null && $couponCode !== '') {
+                $coupon = Coupon::where('code', $couponCode)
+                    ->where('is_active', true)
+                    ->first();
+
+                if (!$coupon) {
+                    throw new \RuntimeException('Invalid coupon code.');
+                }
+                if ($coupon->starts_at && $coupon->starts_at->isFuture()) {
+                    throw new \RuntimeException('This coupon is not active yet.');
+                }
+                if ($coupon->expires_at && $coupon->expires_at->isPast()) {
+                    throw new \RuntimeException('This coupon has expired.');
+                }
+                if ($coupon->max_uses !== null && $coupon->times_used >= $coupon->max_uses) {
+                    throw new \RuntimeException('This coupon has reached its usage limit.');
+                }
+                if ($subtotal < (float) $coupon->min_order_amount) {
+                    throw new \RuntimeException(
+                        "This coupon requires a minimum order of {$coupon->min_order_amount}."
+                    );
+                }
+
+                $discountAmount = $coupon->discount_type === 'percentage'
+                    ? $subtotal * ((float) $coupon->discount_value / 100)
+                    : (float) $coupon->discount_value;
+
+                $discountAmount = min($discountAmount, $subtotal);
+            }
+
+            $shippingAmount = 0.0;
+            $taxAmount = 0.0;
+            $totalPrice = $subtotal - $discountAmount + $shippingAmount + $taxAmount;
+
+            $order = Order::create([
+                'order_number' => $this->generateOrderNumber(),
+                'user_id' => $user->id,
+                'coupon_id' => $coupon?->id,
+                'shipping_address_id' => $shippingAddress->id,
+                'billing_address_id' => ($billingAddress ?? $shippingAddress)->id,
+                'subtotal' => $subtotal,
+                'discount_amount' => $discountAmount,
+                'shipping_amount' => $shippingAmount,
+                'tax_amount' => $taxAmount,
+                'total_price' => $totalPrice,
+                'currency' => 'USD',
+                'status' => 'pending',
+            ]);
+
+            foreach ($orderItemsData as $itemData) {
+                $order->items()->create($itemData);
+            }
+
+            if ($coupon) {
+                $coupon->increment('times_used');
+            }
+
+            return $order->load('items');
+        });
     }
 
     /**
-     * Create an order for a single flash-sale purchase.
-     *
-     * Guards two independent caps with optimistic locks in the same
-     * transaction: the flash sale's own quantity_limit (flash_sale_items
-     * .version) and the product's real stock (inventory.version). Either
-     * one losing its race rolls back the whole transaction and the caller
-     * retries.
-     *
-     * @throws InsufficientStockException
+     * Creates an order from a flash sale purchase using a lock-and-verify pattern.
+     * Bypasses standard inventory in favor of FlashSaleItem's reservation system.
      */
     public function createFromFlashSalePurchase(
         User $user,
         FlashSaleItem $flashSaleItem,
         int $quantity,
         int $shippingAddressId,
-        ?int $billingAddressId = null,
+        ?int $billingAddressId = null
     ): Order {
-        for ($attempt = 0; $attempt < self::MAX_LOCK_RETRIES; $attempt++) {
-            try {
-                return DB::transaction(function () use ($user, $flashSaleItem, $quantity, $shippingAddressId, $billingAddressId) {
-                    // Re-fetch inside the transaction so we're checking the
-                    // latest version, not a possibly-stale copy passed in.
-                    $item = FlashSaleItem::query()->find($flashSaleItem->id);
-                    $product = Product::query()->find($item->product_id);
-                    $inventory = $product?->inventory;
-
-                    if (!$item || !$product || !$inventory) {
-                        throw new InsufficientStockException('This item is no longer available.');
-                    }
-                    if ($item->quantity_sold + $quantity > $item->quantity_limit) {
-                        throw new InsufficientStockException('This item is sold out.');
-                    }
-                    if ($inventory->quantity_available < $quantity) {
-                        throw new InsufficientStockException('This item is sold out.');
-                    }
-
-                    $itemLocked = FlashSaleItem::query()
-                        ->where('id', $item->id)
-                        ->where('version', $item->version)
-                        ->update([
-                            'quantity_sold' => $item->quantity_sold + $quantity,
-                            'version' => $item->version + 1,
-                        ]);
-
-                    if (!$itemLocked) {
-                        throw new OptimisticLockConflictException();
-                    }
-
-                    $this->decrementInventoryOrConflict($inventory, $quantity);
-
-                    $unitPrice = $item->sale_price;
-                    $subtotal = bcmul((string) $unitPrice, (string) $quantity, 2);
-
-                    $order = Order::create([
-                        'order_number' => $this->generateOrderNumber(),
-                        'user_id' => $user->id,
-                        'flash_sale_id' => $item->flash_sale_id,
-                        'shipping_address_id' => $shippingAddressId,
-                        'billing_address_id' => $billingAddressId ?? $shippingAddressId,
-                        'subtotal' => $subtotal,
-                        'discount_amount' => 0,
-                        'shipping_amount' => 0,
-                        'tax_amount' => 0,
-                        'total_price' => $subtotal,
-                        'currency' => $product->currency,
-                        'status' => 'pending',
-                    ]);
-
-                    $order->items()->create([
-                        'product_id' => $product->id,
-                        'product_name_snapshot' => $product->name,
-                        'quantity' => $quantity,
-                        'unit_price' => $unitPrice,
-                    ]);
-
-                    return $order->load('items');
-                });
-            } catch (OptimisticLockConflictException) {
-                usleep(random_int(10_000, 50_000));
-                continue;
+        return DB::transaction(function () use ($user, $flashSaleItem, $quantity, $shippingAddressId, $billingAddressId) {
+            if ($quantity < 1) {
+                throw new \RuntimeException('Item quantity must be at least 1.');
             }
-        }
 
-        throw new InsufficientStockException('Could not reserve stock due to high demand. Please try again.');
+            $shippingAddress = Address::where('id', $shippingAddressId)
+                ->where('user_id', $user->id)
+                ->first();
+
+            if (!$shippingAddress) {
+                throw new \RuntimeException('Invalid shipping address.');
+            }
+
+            $billingAddress = null;
+            if ($billingAddressId !== null) {
+                $billingAddress = Address::where('id', $billingAddressId)
+                    ->where('user_id', $user->id)
+                    ->first();
+
+                if (!$billingAddress) {
+                    throw new \RuntimeException('Invalid billing address.');
+                }
+            }
+
+            // Lock and Verify: Attempt to reserve stock via the FlashSaleItem
+            if (!$flashSaleItem->tryReserve($quantity)) {
+                throw new InsufficientStockException(
+                    "Requested quantity for this flash sale item is no longer available."
+                );
+            }
+
+            $unitPrice = (float) $flashSaleItem->price; // Assumes a price attribute exists on FlashSaleItem
+            $subtotal = $unitPrice * $quantity;
+            $shippingAmount = 0.0;
+            $taxAmount = 0.0;
+            $totalPrice = $subtotal + $shippingAmount + $taxAmount;
+
+            $order = Order::create([
+                'order_number' => $this->generateOrderNumber(),
+                'user_id' => $user->id,
+                'coupon_id' => null, // Flash sales generally do not accept coupons
+                'shipping_address_id' => $shippingAddress->id,
+                'billing_address_id' => ($billingAddress ?? $shippingAddress)->id,
+                'subtotal' => $subtotal,
+                'discount_amount' => 0.0,
+                'shipping_amount' => $shippingAmount,
+                'tax_amount' => $taxAmount,
+                'total_price' => $totalPrice,
+                'currency' => 'USD',
+                'status' => 'pending',
+            ]);
+
+            $order->items()->create([
+                'product_id' => $flashSaleItem->product_id,
+                'product_name_snapshot' => $flashSaleItem->product->name ?? 'Flash Sale Item',
+                'quantity' => $quantity,
+                'unit_price' => $unitPrice,
+            ]);
+
+            return $order->load('items');
+        });
     }
 
     /**
-     * Cancel a pending/confirmed order and release the stock it reserved.
-     * Flash-sale quantity_sold is intentionally NOT decremented — once a
-     * unit has been allocated to a sale it stays counted against the cap,
-     * matching how most flash-sale promos are run (no re-selling a
-     * cancelled slot back into the same event).
+     * Converts the user's current cart into an order.[cite: 1]
+     *
+     * Thin wrapper around createFromItems(): resolves the cart's line
+     * items, delegates the actual order creation, then empties the cart
+     * on success.[cite: 1]
+     *
+     * @throws InsufficientStockException when stock can't cover the cart[cite: 1]
+     * @throws \RuntimeException for any other checkout-blocking condition[cite: 1]
+     *         (empty cart, bad address, bad/expired coupon, etc.)[cite: 1]
+     */
+    public function createFromCart(
+        User $user,
+        int $shippingAddressId,
+        ?int $billingAddressId = null,
+        ?string $couponCode = null,
+    ): Order {
+        return DB::transaction(function () use ($user, $shippingAddressId, $billingAddressId, $couponCode) {
+            $cart = Cart::where('user_id', $user->id)
+                ->with('items')
+                ->lockForUpdate()
+                ->first();
+
+            if (!$cart || $cart->items->isEmpty()) {
+                throw new \RuntimeException('Your cart is empty.');
+            }
+
+            $items = $cart->items->map(fn ($cartItem) => [
+                'product_id' => $cartItem->product_id,
+                'quantity' => $cartItem->quantity,
+            ])->all();
+
+            $order = $this->createFromItems(
+                user: $user,
+                items: $items,
+                shippingAddressId: $shippingAddressId,
+                billingAddressId: $billingAddressId,
+                couponCode: $couponCode,
+            );
+
+            CartItem::where('cart_id', $cart->id)->delete();
+
+            return $order;
+        });
+    }
+
+    /**
+     * Cancels a self-cancellable order and returns its reserved stock.[cite: 1]
      */
     public function cancel(Order $order): Order
     {
         return DB::transaction(function () use ($order) {
-            foreach ($order->items()->with('product.inventory')->get() as $item) {
-                $inventory = $item->product?->inventory;
+            $order = Order::where('id', $order->id)->lockForUpdate()->firstOrFail();
+
+            foreach ($order->items()->lockForUpdate()->get() as $item) {
+                $inventory = Inventory::where('product_id', $item->product_id)
+                    ->lockForUpdate()
+                    ->first();
+
                 if ($inventory) {
-                    $inventory->increment('quantity_available', $item->quantity);
-                    $inventory->increment('version');
+                    DB::table('inventory')
+                        ->where('id', $inventory->id)
+                        ->update([
+                            'quantity_available' => $inventory->quantity_available + $item->quantity,
+                            'version' => $inventory->version + 1,
+                            'updated_at' => now(),
+                        ]);
                 }
             }
 
@@ -229,72 +342,8 @@ class OrderService
         });
     }
 
-    /**
-     * Decrement inventory.quantity_available under an optimistic lock.
-     *
-     * @throws OptimisticLockConflictException if another request updated
-     *         the row first (version mismatch).
-     */
-    private function decrementInventoryOrConflict(\App\Models\Inventory $inventory, int $quantity): void
-    {
-        $updated = DB::table('inventory')
-            ->where('id', $inventory->id)
-            ->where('version', $inventory->version)
-            ->update([
-                'quantity_available' => $inventory->quantity_available - $quantity,
-                'version' => $inventory->version + 1,
-                'updated_at' => now(),
-            ]);
-
-        if (!$updated) {
-            throw new OptimisticLockConflictException();
-        }
-    }
-
-    /**
-     * Validate a coupon code and return [discountAmount, Coupon|null].
-     * Silently ignores an invalid/expired/inapplicable code rather than
-     * failing checkout — surface a warning to the user upstream if you'd
-     * rather it be a hard error.
-     */
-    private function applyCoupon(?string $code, string $subtotal): array
-    {
-        if (!$code) {
-            return ['0.00', null];
-        }
-
-        $coupon = Coupon::query()->where('code', $code)->where('is_active', true)->first();
-
-        if (!$coupon) {
-            return ['0.00', null];
-        }
-        if ($coupon->starts_at && now()->lt($coupon->starts_at)) {
-            return ['0.00', null];
-        }
-        if ($coupon->expires_at && now()->gt($coupon->expires_at)) {
-            return ['0.00', null];
-        }
-        if ($coupon->max_uses !== null && $coupon->times_used >= $coupon->max_uses) {
-            return ['0.00', null];
-        }
-        if (bccomp($subtotal, (string) $coupon->min_order_amount, 2) < 0) {
-            return ['0.00', null];
-        }
-
-        $discount = $coupon->discount_type === 'percentage'
-            ? bcmul($subtotal, bcdiv((string) $coupon->discount_value, '100', 4), 2)
-            : (string) $coupon->discount_value;
-
-        // Never discount more than the subtotal itself.
-        if (bccomp($discount, $subtotal, 2) > 0) {
-            $discount = $subtotal;
-        }
-
-        return [$discount, $coupon];
-    }
-
     private function generateOrderNumber(): string
     {
-        return 'ORD-' . strtoupper(Str::random(10));
+        return 'ORD-' . now()->format('Ymd') . '-' . strtoupper(Str::random(8));
     }
 }
