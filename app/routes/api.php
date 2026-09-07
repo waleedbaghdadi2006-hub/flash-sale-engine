@@ -1,9 +1,15 @@
 <?php
 
+use App\Http\Controllers\Admin\CouponController;
+use App\Http\Controllers\AddressController;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\CartController;
 use App\Http\Controllers\HealthController;
+use App\Http\Controllers\OrderController;
+use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\ProductController;
 use App\Http\Controllers\FlashSaleController;
+use App\Http\Controllers\PaymentWebhookController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/health', [HealthController::class, 'index']);
@@ -63,3 +69,52 @@ Route::prefix('flash-sales')->group(function () {
         Route::post('/{flashSale}/purchase', [FlashSaleController::class, 'purchase']);
     });
 });
+
+// Cart, checkout, addresses, and payments are all customer-facing and
+// always operate on the authenticated user's own data.
+Route::middleware('auth:api')->group(function () {
+    Route::prefix('cart')->group(function () {
+        Route::get('/', [CartController::class, 'show']);
+        Route::delete('/', [CartController::class, 'clear']);
+        Route::post('/buy-now', [CartController::class, 'buyNow']);
+
+        Route::post('/items', [CartController::class, 'addItem']);
+        Route::patch('/items/{item}', [CartController::class, 'updateItem']);
+        Route::delete('/items/{item}', [CartController::class, 'removeItem']);
+    });
+
+    Route::prefix('orders')->group(function () {
+        Route::get('/', [OrderController::class, 'index']);
+        Route::get('/{id}', [OrderController::class, 'show']);
+        Route::post('/', [OrderController::class, 'store']);
+        Route::post('/{id}/cancel', [OrderController::class, 'cancel']);
+
+        Route::get('/{order}/payments', [PaymentController::class, 'index']);
+        Route::post('/{order}/payments', [PaymentController::class, 'store']);
+    });
+
+    Route::prefix('addresses')->group(function () {
+        Route::get('/', [AddressController::class, 'index']);
+        Route::post('/', [AddressController::class, 'store']);
+        Route::match(['put', 'patch'], '/{id}', [AddressController::class, 'update']);
+        Route::delete('/{id}', [AddressController::class, 'destroy']);
+    });
+});
+
+// Admin-only coupon management.
+Route::prefix('admin/coupons')->middleware(['auth:api', 'role:admin'])->group(function () {
+    Route::get('/', [CouponController::class, 'index']);
+    Route::get('/{id}', [CouponController::class, 'show']);
+    Route::post('/', [CouponController::class, 'store']);
+    Route::match(['put', 'patch'], '/{id}', [CouponController::class, 'update']);
+    Route::delete('/{id}', [CouponController::class, 'destroy']);
+    Route::post('/{id}/toggle', [CouponController::class, 'toggle']);
+    
+});
+
+// Async payment-gateway confirmations. Deliberately outside auth:api — the
+// gateway calls this directly and carries no user bearer token. Signature
+// verification (see PaymentWebhookController::verifySignature()) is what
+// stands in for auth here, so don't wire in a real provider before
+// implementing that.
+Route::post('/webhooks/payments/{provider}', [PaymentWebhookController::class, 'handle']);

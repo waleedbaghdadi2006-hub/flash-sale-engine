@@ -129,7 +129,39 @@ class CartController extends Controller
         return response()->json(['message' => 'Cart cleared.']);
     }
 
-   
+    /**
+     * POST /cart/buy-now
+     * Body: { product_id, quantity, shipping_address_id, billing_address_id?, coupon_code? }
+     *
+     * Skips the cart entirely — takes the single product/quantity the user
+     * selected plus checkout details and goes straight to order creation via
+     * OrderService::createFromItems(), per that method's own docblock.
+     */
+    public function buyNow(BuyNowRequest $request): JsonResponse
+    {
+        $data = $request->validated();
+
+        try {
+            $order = $this->orderService->createFromItems(
+                user: $request->user(),
+                items: [[
+                    'product_id' => (int) $data['product_id'],
+                    'quantity' => (int) $data['quantity'],
+                ]],
+                shippingAddressId: (int) $data['shipping_address_id'],
+                billingAddressId: $data['billing_address_id'] !== null
+                    ? (int) $data['billing_address_id']
+                    : null,
+                couponCode: $data['coupon_code'] ?? null,
+            );
+        } catch (InsufficientStockException $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
+        } catch (\RuntimeException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+
+        return response()->json($order, 201);
+    }
 
     /**
      * Adds a product to a cart, merging quantity into any existing line for

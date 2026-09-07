@@ -234,7 +234,7 @@ class OrderService
                 );
             }
 
-            $unitPrice = (float) $flashSaleItem->price; // Assumes a price attribute exists on FlashSaleItem
+            $unitPrice = (float) $flashSaleItem->sale_price; // Assumes a price attribute exists on FlashSaleItem
             $subtotal = $unitPrice * $quantity;
             $shippingAmount = 0.0;
             $taxAmount = 0.0;
