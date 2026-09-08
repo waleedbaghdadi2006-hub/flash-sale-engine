@@ -62,9 +62,10 @@ class ProductController extends Controller
         // Search across name and description (supports ?q= or ?search=)
         $term = $request->query('q') ?? $request->query('search');
         if (!empty($term)) {
-            $query->where(function ($q) use ($term) {
-                $q->where('name', 'like', "%{$term}%")
-                    ->orWhere('description', 'like', "%{$term}%");
+            $escapedTerm = addcslashes((string) $term, '\\%_');
+            $query->where(function ($q) use ($escapedTerm) {
+                $q->where('name', 'like', "%{$escapedTerm}%")
+                    ->orWhere('description', 'like', "%{$escapedTerm}%");
             });
         }
 
@@ -208,6 +209,12 @@ class ProductController extends Controller
     public function destroy(Request $request, int $id): JsonResponse
     {
         $force = $request->boolean('force');
+
+        if ($force && $request->user()?->role !== 'admin') {
+            return response()->json([
+                'message' => 'Only administrators can permanently delete products.',
+            ], 403);
+        }
 
         // If force deleting, search including soft-deleted items
         $product = $force

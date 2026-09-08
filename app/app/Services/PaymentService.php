@@ -5,34 +5,59 @@ namespace App\Services;
 use App\Models\Order;
 use App\Models\Payment;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
-/**
- * Wraps the payment-gateway confirmation step: writes the Payment row and
- * moves the Order out of `pending` inside a single locked transaction,
- * mirroring the lockForUpdate() style already used in OrderService.
- *
- * In dev/test (or until a real gateway is wired in), the "gateway call" is
- * just trusting the provider/provider_transaction_id/status the client (or
- * PaymentController) already confirmed — see confirm()'s $status param.
- *
- * TODO (production): re-verify the charge server-side against the real
- * gateway (e.g. a Stripe PaymentIntent lookup) instead of trusting the
- * client-supplied status/amount, and consider adding an async
- * PaymentWebhookController for gateways that confirm out-of-band.
- */
 class PaymentService
 {
     /**
-     * @throws \RuntimeException if the order can't currently accept a payment
-     *         (already confirmed/cancelled/etc.), or the amount doesn't
-     *         match the order total.
+     * Development-only payment simulation. The server derives the amount
+     * from the order and generates the transaction id/result itself.
      */
-    public function confirm(
+    public function confirmLocal(Order $order, string $provider = 'local_mock'): Payment
+    {
+        if (!app()->environment(['local', 'testing'])) {
+            throw new \RuntimeException(
+                'Local payments are disabled outside the local/test environment. Configure a real payment provider before deployment.'
+            );
+        }
+
+        return $this->recordVerifiedPayment(
+            order: $order,
+            provider: $provider,
+            providerTransactionId: 'local_' . Str::uuid(),
+            amount: (string) $order->total_price,
+            status: 'succeeded',
+        );
+    }
+
+    /**
+     * Applies a payment result that has already been verified by a trusted
+     * payment-provider integration (e.g. a signed webhook).
+     */
+    public function confirmVerified(
         Order $order,
         string $provider,
         string $providerTransactionId,
-        float $amount,
+        string $amount,
         string $status = 'succeeded',
+        ?string $failureReason = null,
+    ): Payment {
+        return $this->recordVerifiedPayment(
+            order: $order,
+            provider: $provider,
+            providerTransactionId: $providerTransactionId,
+            amount: $amount,
+            status: $status,
+            failureReason: $failureReason,
+        );
+    }
+
+    private function recordVerifiedPayment(
+        Order $order,
+        string $provider,
+        string $providerTransactionId,
+        string $amount,
+        string $status,
         ?string $failureReason = null,
     ): Payment {
         return DB::transaction(function () use ($order, $provider, $providerTransactionId, $amount, $status, $failureReason) {
@@ -44,7 +69,11 @@ class PaymentService
                 );
             }
 
-            if ($status === 'succeeded' && abs($amount - (float) $order->total_price) > 0.005) {
+            if (!in_array($status, ['succeeded', 'failed'], true)) {
+                throw new \RuntimeException('Unsupported payment status.');
+            }
+
+            if ($status === 'succeeded' && $this->moneyToCents($amount) !== $this->moneyToCents((string) $order->total_price)) {
                 throw new \RuntimeException(
                     "Payment amount ({$amount}) does not match the order total ({$order->total_price})."
                 );
@@ -60,15 +89,21 @@ class PaymentService
                 'failure_reason' => $status === 'failed' ? $failureReason : null,
             ]);
 
-            // orders.status is an ENUM of pending/confirmed/shipped/delivered/
-            // cancelled/refunded — there's no "payment_failed" order status,
-            // so a failed attempt just leaves the order `pending` (its
-            // Payment row records the failure) and the user can retry.
             if ($status === 'succeeded') {
                 $order->update(['status' => 'confirmed']);
             }
 
             return $payment;
         });
+    }
+
+    private function moneyToCents(string $amount): int
+    {
+        $amount = trim($amount);
+        if (!preg_match('/^(\d+)(?:\.(\d{1,2}))?$/', $amount, $matches)) {
+            throw new \RuntimeException('Invalid monetary amount.');
+        }
+
+        return ((int) $matches[1] * 100) + (int) str_pad($matches[2] ?? '', 2, '0');
     }
 }

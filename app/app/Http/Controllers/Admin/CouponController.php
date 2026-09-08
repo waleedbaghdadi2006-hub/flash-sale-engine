@@ -36,9 +36,10 @@ class CouponController extends Controller
 
         if ($request->filled('search')) {
             $term = $request->query('search');
-            $query->where(function ($q) use ($term) {
-                $q->where('code', 'like', "%{$term}%")
-                    ->orWhere('description', 'like', "%{$term}%");
+            $escapedTerm = addcslashes((string) $term, '\\%_');
+            $query->where(function ($q) use ($escapedTerm) {
+                $q->where('code', 'like', "%{$escapedTerm}%")
+                    ->orWhere('description', 'like', "%{$escapedTerm}%");
             });
         }
 

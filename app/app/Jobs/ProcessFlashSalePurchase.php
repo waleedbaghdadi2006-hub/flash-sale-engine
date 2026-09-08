@@ -5,7 +5,7 @@ namespace App\Jobs;
 use App\Exceptions\InsufficientStockException;
 use App\Models\FlashSaleItem;
 use App\Models\User;
-use App\Services\OrderService;
+use App\Services\PurchaseService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -20,10 +20,10 @@ class ProcessFlashSalePurchase implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     /**
-     * Retries are handled internally by OrderService's own optimistic-lock
-     * retry loop, so the job itself only ever gets one shot — re-queuing
-     * the whole job on failure would double-charge the retry budget and
-     * make the reference status flap between pending/failed.
+     * The job is intentionally one-shot. PurchaseService performs the
+     * authoritative flash-sale reservation inside the database transaction;
+     * a failed attempt is returned to the client as a terminal result for
+     * that purchase reference.
      */
     public int $tries = 1;
 
@@ -37,7 +37,7 @@ class ProcessFlashSalePurchase implements ShouldQueue
     ) {
     }
 
-    public function handle(OrderService $orderService): void
+    public function handle(PurchaseService $purchaseService): void
     {
         $cacheKey = "flash_sale_purchase:{$this->referenceId}";
 
@@ -45,7 +45,7 @@ class ProcessFlashSalePurchase implements ShouldQueue
             $user = User::findOrFail($this->userId);
             $flashSaleItem = FlashSaleItem::findOrFail($this->flashSaleItemId);
 
-            $order = $orderService->createFromFlashSalePurchase(
+            $order = $purchaseService->purchaseFlashSale(
                 user: $user,
                 flashSaleItem: $flashSaleItem,
                 quantity: $this->quantity,
@@ -54,6 +54,7 @@ class ProcessFlashSalePurchase implements ShouldQueue
             );
 
             Cache::put($cacheKey, [
+                'user_id' => $this->userId,
                 'status' => 'completed',
                 'order_id' => $order->id,
                 'order_number' => $order->order_number,
@@ -62,6 +63,7 @@ class ProcessFlashSalePurchase implements ShouldQueue
         } catch (InsufficientStockException $e) {
             // Expected outcome under real flash-sale contention — not an error.
             Cache::put($cacheKey, [
+                'user_id' => $this->userId,
                 'status' => 'failed',
                 'message' => $e->getMessage(),
             ], now()->addMinutes(15));
@@ -74,6 +76,7 @@ class ProcessFlashSalePurchase implements ShouldQueue
             ]);
 
             Cache::put($cacheKey, [
+                'user_id' => $this->userId,
                 'status' => 'failed',
                 'message' => 'Something went wrong processing your purchase. Please try again.',
             ], now()->addMinutes(15));

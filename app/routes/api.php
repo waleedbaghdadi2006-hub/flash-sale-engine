@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\Route;
 
 Route::get('/health', [HealthController::class, 'index']);
 
-Route::prefix('auth')->group(function () {
+Route::prefix('auth')->middleware('throttle:auth')->group(function () {
     Route::post('/register', [AuthController::class, 'register']);
     Route::post('/login', [AuthController::class, 'login']);
     Route::post('/verify-email', [AuthController::class, 'verifyEmail']);
@@ -22,13 +22,13 @@ Route::prefix('auth')->group(function () {
     Route::post('/reset-password', [AuthController::class, 'resetPassword']);
     Route::post('/refresh', [AuthController::class, 'refresh']);
 
-    Route::middleware('auth:api')->group(function () {
+    Route::middleware(['auth:api', 'throttle:api'])->group(function () {
         Route::get('/me', [AuthController::class, 'me']);
         Route::post('/logout', [AuthController::class, 'logout']);
     });
 });
 
-Route::prefix('products')->group(function () {
+Route::prefix('products')->middleware('throttle:api')->group(function () {
     Route::get('/', [ProductController::class, 'index']);
     Route::get('/{idOrSlug}', [ProductController::class, 'show']);
 
@@ -41,7 +41,7 @@ Route::prefix('products')->group(function () {
     });
 });
 
-Route::prefix('flash-sales')->group(function () {
+Route::prefix('flash-sales')->middleware('throttle:api')->group(function () {
     // Public reads
     Route::get('/', [FlashSaleController::class, 'index']);
     Route::get('/{flashSale}', [FlashSaleController::class, 'show']);
@@ -49,7 +49,7 @@ Route::prefix('flash-sales')->group(function () {
     // Poll purchase outcome — must be registered before the purchase route
     // below if you ever nest it under {flashSale}; kept flat here since
     // purchaseStatus() only needs the reference, not the sale.
-    Route::get('/purchases/{reference}/status', [FlashSaleController::class, 'purchaseStatus'])
+    Route::get('/purchases/{reference}/status', [FlashSaleController::class, 'purchaseStatus'])->middleware('auth:api')
         ->name('flash-sales.purchases.status');
 
     // Mutating routes restricted to staff/admin accounts only.
@@ -72,7 +72,7 @@ Route::prefix('flash-sales')->group(function () {
 
 // Cart, checkout, addresses, and payments are all customer-facing and
 // always operate on the authenticated user's own data.
-Route::middleware('auth:api')->group(function () {
+Route::middleware(['auth:api', 'throttle:api'])->group(function () {
     Route::prefix('cart')->group(function () {
         Route::get('/', [CartController::class, 'show']);
         Route::delete('/', [CartController::class, 'clear']);
@@ -99,22 +99,21 @@ Route::middleware('auth:api')->group(function () {
         Route::match(['put', 'patch'], '/{id}', [AddressController::class, 'update']);
         Route::delete('/{id}', [AddressController::class, 'destroy']);
     });
+    // Admin-only coupon management.
+    Route::prefix('admin/coupons')->middleware(['auth:api', 'role:admin', 'throttle:api'])->group(function () {
+        Route::get('/', [CouponController::class, 'index']);
+        Route::get('/{id}', [CouponController::class, 'show']);
+        Route::post('/', [CouponController::class, 'store']);
+        Route::match(['put', 'patch'], '/{id}', [CouponController::class, 'update']);
+        Route::delete('/{id}', [CouponController::class, 'destroy']);
+        Route::post('/{id}/toggle', [CouponController::class, 'toggle']);
+
+    });
 });
 
-// Admin-only coupon management.
-Route::prefix('admin/coupons')->middleware(['auth:api', 'role:admin'])->group(function () {
-    Route::get('/', [CouponController::class, 'index']);
-    Route::get('/{id}', [CouponController::class, 'show']);
-    Route::post('/', [CouponController::class, 'store']);
-    Route::match(['put', 'patch'], '/{id}', [CouponController::class, 'update']);
-    Route::delete('/{id}', [CouponController::class, 'destroy']);
-    Route::post('/{id}/toggle', [CouponController::class, 'toggle']);
-    
-});
 
-// Async payment-gateway confirmations. Deliberately outside auth:api — the
-// gateway calls this directly and carries no user bearer token. Signature
-// verification (see PaymentWebhookController::verifySignature()) is what
-// stands in for auth here, so don't wire in a real provider before
-// implementing that.
-Route::post('/webhooks/payments/{provider}', [PaymentWebhookController::class, 'handle']);
+
+// Async payment-gateway confirmations. Deliberately outside auth:api because
+// real gateways call this directly. Signature verification is intentionally
+// disabled outside local/test until a real provider integration is installed.
+Route::post('/webhooks/payments/{provider}', [PaymentWebhookController::class, 'handle'])->middleware('throttle:api');

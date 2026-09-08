@@ -6,12 +6,13 @@ use App\Exceptions\InsufficientStockException;
 use App\Http\Requests\StoreOrderRequest;
 use App\Models\Order;
 use App\Services\OrderService;
+use App\Services\PurchaseService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class OrderController extends Controller
 {
-    public function __construct(private readonly OrderService $orderService)
+    public function __construct(private readonly OrderService $orderService, private readonly PurchaseService $purchaseService)
     {
     }
 
@@ -56,13 +57,12 @@ class OrderController extends Controller
      *
      * Standard (non-flash-sale) checkout: turns the current user's cart
      * into an order. Flash-sale purchases go through
-     * FlashSaleController::purchase() instead, which reserves stock via
-     * the same OrderService but under the queued job.
+     * FlashSaleController::purchase() uses the same PurchaseService workflow in a queued job.
      */
     public function store(StoreOrderRequest $request): JsonResponse
     {
         try {
-            $order = $this->orderService->createFromCart(
+            $order = $this->purchaseService->purchaseFromCart(
                 user: $request->user(),
                 shippingAddressId: (int) $request->validated('shipping_address_id'),
                 billingAddressId: $request->validated('billing_address_id') !== null

@@ -67,11 +67,11 @@ class PaymentWebhookController extends Controller
         }
 
         try {
-            $this->paymentService->confirm(
+            $this->paymentService->confirmVerified(
                 order: $order,
                 provider: $provider,
                 providerTransactionId: $payload['provider_transaction_id'],
-                amount: (float) $payload['amount'],
+                amount: (string) $payload['amount'],
                 status: $payload['status'],
                 failureReason: $payload['failure_reason'] ?? null,
             );
@@ -91,15 +91,13 @@ class PaymentWebhookController extends Controller
     }
 
     /**
-     * STUB — replace with real signature verification for the provider in
-     * use (e.g. \Stripe\Webhook::constructEvent() with the raw request
-     * body, the Stripe-Signature header, and your webhook signing secret
-     * from config). Returning true unconditionally is only acceptable
-     * while this endpoint is mock-only and not reachable from the public
-     * internet.
+     * Local/test guard only. Replace this with the provider SDK's real
+     * signature verification before enabling webhooks in production.
      */
     private function verifySignature(Request $request, string $provider): bool
     {
-        return true;
+        // Local/test only: this endpoint remains disabled until a real
+        // provider signature check is installed before deployment.
+        return app()->environment(['local', 'testing']);
     }
 }

@@ -11,7 +11,7 @@ use App\Models\UserToken;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Log; // Added for temporary Postman token extraction
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Tymon\JWTAuth\Facades\JWTAuth;
@@ -45,7 +45,9 @@ class AuthController extends Controller
             $verificationToken = $this->issueUserToken($user, 'email_verification', self::EMAIL_VERIFICATION_TTL_HOURS * 60);
 
             // Logs the raw string to storage/logs/laravel.log so you can copy it for Postman testing
-            Log::info("NEW " . $user->email . " VERIFICATION TOKEN: " . $verificationToken);
+            if (app()->environment('local')) {
+                Log::info("NEW " . $user->email . " VERIFICATION TOKEN: " . $verificationToken);
+            }
 
             // Returning 201 Created without issuing JWT/Refresh tokens to enforce strict verification
             return response()->json([
@@ -85,7 +87,7 @@ class AuthController extends Controller
         // 1. Check if email exists
         if (!$user) {
             throw ValidationException::withMessages([
-                'email' => ['Email address not found.'],
+                'email' => ['Invalid credentials.'],
             ]);
         }
 
@@ -109,7 +111,7 @@ class AuthController extends Controller
             }
 
             throw ValidationException::withMessages([
-                'password' => ['Incorrect password.'],
+                'email' => ['Invalid credentials.'],
             ]);
         }
 
@@ -255,7 +257,9 @@ class AuthController extends Controller
         if ($user) {
             $resetToken = $this->issueUserToken($user, 'password_reset', self::PASSWORD_RESET_TTL_MINUTES);
 
-            Log::info("PASSWORD RESET TOKEN: " . $resetToken);
+            if (app()->environment('local')) {
+                Log::info("PASSWORD RESET TOKEN: " . $resetToken);
+            }
 
             $this->logAudit($user->id, 'password_reset_requested', 'user', $user->id);
         }

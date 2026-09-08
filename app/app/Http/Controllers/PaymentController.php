@@ -17,10 +17,11 @@ class PaymentController extends Controller
     /**
      * POST /orders/{order}/payments
      *
-     * Records a payment attempt for an order the authenticated user owns —
-     * either the confirmation of a client-side gateway charge, or a mocked
-     * success/failure in dev — and flips the order to `confirmed` on
-     * success. Scoped to the current user the same way OrderController's
+     * Records a local development payment simulation for an order the
+     * authenticated user owns. The server derives the amount and transaction
+     * id; no client-supplied payment result is trusted. Replace this endpoint
+     * with a real provider checkout + signed webhook before deployment.
+     * Scoped to the current user the same way OrderController's
      * show()/cancel() are, so one customer can't pay for another's order.
      */
     public function store(ConfirmPaymentRequest $request, int $order): JsonResponse
@@ -36,13 +37,9 @@ class PaymentController extends Controller
         $data = $request->validated();
 
         try {
-            $payment = $this->paymentService->confirm(
+            $payment = $this->paymentService->confirmLocal(
                 order: $order,
-                provider: $data['provider'],
-                providerTransactionId: $data['provider_transaction_id'],
-                amount: (float) $data['amount'],
-                status: $data['status'] ?? 'succeeded',
-                failureReason: $data['failure_reason'] ?? null,
+                provider: $data['provider'] ?? 'local_mock',
             );
         } catch (\RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 422);

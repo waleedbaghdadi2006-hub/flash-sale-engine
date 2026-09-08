@@ -9,14 +9,14 @@ use App\Http\Requests\Cart\UpdateCartItemRequest;
 use App\Models\Cart;
 use App\Models\CartItem;
 use App\Models\Product;
-use App\Services\OrderService;
+use App\Services\PurchaseService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class CartController extends Controller
 {
-    public function __construct(private readonly OrderService $orderService)
+    public function __construct(private readonly PurchaseService $purchaseService)
     {
     }
 
@@ -135,14 +135,14 @@ class CartController extends Controller
      *
      * Skips the cart entirely — takes the single product/quantity the user
      * selected plus checkout details and goes straight to order creation via
-     * OrderService::createFromItems(), per that method's own docblock.
+     * PurchaseService::purchaseRegular(), per that method's own docblock.
      */
     public function buyNow(BuyNowRequest $request): JsonResponse
     {
         $data = $request->validated();
 
         try {
-            $order = $this->orderService->createFromItems(
+            $order = $this->purchaseService->purchaseRegular(
                 user: $request->user(),
                 items: [[
                     'product_id' => (int) $data['product_id'],

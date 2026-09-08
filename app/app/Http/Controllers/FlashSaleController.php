@@ -114,7 +114,10 @@ class FlashSaleController extends Controller
 
         $referenceId = (string) Str::uuid();
 
-        Cache::put("flash_sale_purchase:{$referenceId}", ['status' => 'pending'], now()->addMinutes(15));
+        Cache::put("flash_sale_purchase:{$referenceId}", [
+            'user_id' => $request->user()->id,
+            'status' => 'pending',
+        ], now()->addMinutes(15));
 
         ProcessFlashSalePurchase::dispatch(
             referenceId: $referenceId,
@@ -135,11 +138,14 @@ class FlashSaleController extends Controller
     /**
      * Poll the outcome of a queued purchase attempt.
      */
-    public function purchaseStatus(string $reference): JsonResponse
+    public function purchaseStatus(Request $request, string $reference): JsonResponse
     {
         $status = Cache::get("flash_sale_purchase:{$reference}");
 
         abort_unless($status !== null, 404, 'Unknown or expired purchase reference.');
+        abort_unless((int) ($status['user_id'] ?? 0) === (int) $request->user()->id, 404, 'Unknown or expired purchase reference.');
+
+        unset($status['user_id']);
 
         return response()->json($status);
     }
