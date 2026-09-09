@@ -5,7 +5,7 @@ info:
   description: Generated from the supplied Postman collection. It documents the Products
     and Flash Sales endpoints present in the export.
 servers:
-- url: http://localhost
+- url: http://localhost:8000
   description: Local environment default
 - url: http://0.0.0.0:8000
   description: Collection default
