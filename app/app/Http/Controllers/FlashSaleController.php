@@ -9,6 +9,7 @@ use App\Http\Requests\FlashSale\UpdateFlashSaleRequest;
 use App\Jobs\ProcessFlashSalePurchase;
 use App\Models\FlashSale;
 use App\Models\FlashSaleItem;
+use App\Services\FlashSaleStock;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -89,24 +90,59 @@ class FlashSaleController extends Controller
     /**
      * Attempt to purchase a flash sale item.
      *
-     * This does NOT reserve stock synchronously — under flash-sale traffic,
-     * doing the optimistic-lock retry loop inline would mean many requests
-     * fighting over the same row at once. Instead we hand the reservation
-     * + order creation off to a queued job (serialized by the queue worker
-     * pool) and return a reference the client can poll for the outcome.
+     * This does NOT reserve stock synchronously in the database — under
+     * flash-sale traffic, doing the optimistic-lock retry loop inline would
+     * mean many requests fighting over the same row at once. Instead we
+     * hand the reservation + order creation off to a queued job (serialized
+     * by the queue worker pool) and return a reference the client can poll
+     * for the outcome.
+     *
+     * Before dispatching, a Redis atomic counter (FlashSaleStock) acts as a
+     * fast gatekeeper: it rejects sold-out requests in microseconds without
+     * touching MySQL at all, and only requests that win the Redis
+     * decrement get queued. That counter is a cache in front of the
+     * DB-authoritative reservation — PurchaseService still re-checks and
+     * re-reserves against the `flash_sale_items` row inside the job, which
+     * remains the permanent source of truth. If Redis is disabled
+     * (`flash_sale.redis_stock_enabled`) or unavailable, this falls back to
+     * the original cheap-check-then-queue behavior.
      *
      * Route for this action must be behind the `flash_sale.active` middleware.
      */
-    public function purchase(PurchaseFlashSaleItemRequest $request, FlashSale $flashSale): JsonResponse
+    public function purchase(PurchaseFlashSaleItemRequest $request, FlashSale $flashSale, FlashSaleStock $flashSaleStock): JsonResponse
     {
         $flashSaleItem = FlashSaleItem::query()
             ->where('flash_sale_id', $flashSale->id)
             ->where('product_id', $request->validated('product_id'))
             ->firstOrFail();
 
-        // Cheap, non-authoritative check for a fast "obviously sold out" response.
-        // The job re-checks authoritatively before reserving anything.
-        if ($flashSaleItem->remainingStock() < $request->validated('quantity')) {
+        $quantity = (int) $request->validated('quantity');
+
+        // Did the Redis counter itself authoritatively decrement stock for
+        // this request? Only true on a genuine RESERVED result — never on
+        // SOLD_OUT (we return before reaching here) or UNAVAILABLE (Redis
+        // is disabled/down, so nothing was reserved and the job must rely
+        // solely on the DB lock). The job needs to know this so it can
+        // release the unit back to Redis if the DB-side reservation fails.
+        $reservedViaRedis = false;
+
+        if (config('flash_sale.redis_stock_enabled')) {
+            $reservation = $flashSaleStock->reserve($flashSaleItem, $quantity);
+
+            if ($reservation === FlashSaleStock::SOLD_OUT) {
+                return response()->json([
+                    'message' => 'This item is sold out.',
+                ], 409);
+            }
+
+            $reservedViaRedis = $reservation === FlashSaleStock::RESERVED;
+        }
+
+        // Cheap, non-authoritative "obviously sold out" check. Only needed
+        // when Redis didn't already give us an authoritative answer above
+        // (disabled or UNAVAILABLE) — the job re-checks authoritatively
+        // against the DB before reserving anything either way.
+        if (!$reservedViaRedis && $flashSaleItem->remainingStock() < $quantity) {
             return response()->json([
                 'message' => 'This item is sold out.',
             ], 409);
@@ -123,9 +159,10 @@ class FlashSaleController extends Controller
             referenceId: $referenceId,
             userId: $request->user()->id,
             flashSaleItemId: $flashSaleItem->id,
-            quantity: (int) $request->validated('quantity'),
+            quantity: $quantity,
             shippingAddressId: (int) $request->validated('shipping_address_id'),
             billingAddressId: $request->validated('billing_address_id'),
+            reservedViaRedis: $reservedViaRedis,
         );
 
         return response()->json([

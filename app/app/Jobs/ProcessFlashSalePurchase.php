@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Exceptions\InsufficientStockException;
 use App\Models\FlashSaleItem;
 use App\Models\User;
+use App\Services\FlashSaleStock;
 use App\Services\PurchaseService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -34,10 +35,21 @@ class ProcessFlashSalePurchase implements ShouldQueue
         public readonly int $quantity,
         public readonly int $shippingAddressId,
         public readonly ?int $billingAddressId,
+        /**
+         * Whether FlashSaleController::purchase() already won this unit
+         * from the Redis atomic counter (App\Services\FlashSaleStock)
+         * before dispatching. When true and the DB-authoritative
+         * reservation below fails for any reason, the unit must be handed
+         * back via FlashSaleStock::release() — otherwise a transient
+         * failure (crash recovery, a version-conflict retry loss, manual
+         * DB edits) would permanently shrink the advertised Redis stock
+         * even though no order was actually created.
+         */
+        public readonly bool $reservedViaRedis = false,
     ) {
     }
 
-    public function handle(PurchaseService $purchaseService): void
+    public function handle(PurchaseService $purchaseService, FlashSaleStock $flashSaleStock): void
     {
         $cacheKey = "flash_sale_purchase:{$this->referenceId}";
 
@@ -62,12 +74,16 @@ class ProcessFlashSalePurchase implements ShouldQueue
             ], now()->addMinutes(15));
         } catch (InsufficientStockException $e) {
             // Expected outcome under real flash-sale contention — not an error.
+            $this->releaseRedisReservation($flashSaleStock);
+
             Cache::put($cacheKey, [
                 'user_id' => $this->userId,
                 'status' => 'failed',
                 'message' => $e->getMessage(),
             ], now()->addMinutes(15));
         } catch (Throwable $e) {
+            $this->releaseRedisReservation($flashSaleStock);
+
             Log::error('Flash sale purchase job failed unexpectedly', [
                 'reference_id' => $this->referenceId,
                 'flash_sale_item_id' => $this->flashSaleItemId,
@@ -80,6 +96,18 @@ class ProcessFlashSalePurchase implements ShouldQueue
                 'status' => 'failed',
                 'message' => 'Something went wrong processing your purchase. Please try again.',
             ], now()->addMinutes(15));
+        }
+    }
+
+    /**
+     * No-op unless this request actually won its unit from Redis first —
+     * an UNAVAILABLE/disabled purchase never touched the counter, so
+     * releasing here would wrongly inflate stock that was never taken.
+     */
+    private function releaseRedisReservation(FlashSaleStock $flashSaleStock): void
+    {
+        if ($this->reservedViaRedis) {
+            $flashSaleStock->release($this->flashSaleItemId, $this->quantity);
         }
     }
 }

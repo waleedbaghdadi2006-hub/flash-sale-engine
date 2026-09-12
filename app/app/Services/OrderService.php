@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\FlashSale;
 use App\Models\FlashSaleItem;
 use App\Models\Inventory;
 use App\Models\Order;
@@ -13,6 +14,10 @@ use Illuminate\Support\Facades\DB;
  */
 class OrderService
 {
+    public function __construct(private readonly FlashSaleStock $flashSaleStock)
+    {
+    }
+
     public function cancel(Order $order): Order
     {
         return DB::transaction(function () use ($order) {
@@ -34,6 +39,17 @@ class OrderService
                             'quantity_sold' => $flashSaleItem->quantity_sold - $item->quantity,
                             'version' => $flashSaleItem->version + 1,
                         ]);
+
+                        // Give the cancelled unit(s) back to the live Redis
+                        // counter so they become purchasable again — unless
+                        // the sale has already ended, in which case the key
+                        // is simply left to expire/be cleaned up rather
+                        // than resurrected for a sale nobody can buy from
+                        // anymore.
+                        if ($order->flashSale?->status !== FlashSale::STATUS_ENDED) {
+                            $this->flashSaleStock->release($flashSaleItem->id, $item->quantity);
+                        }
+
                         continue;
                     }
                 }

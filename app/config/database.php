@@ -179,6 +179,11 @@ return [
             'backoff_cap' => env('REDIS_BACKOFF_CAP', 1000),
         ],
 
+        // Flash-sale atomic stock counters (App\Services\FlashSaleStock).
+        // Kept on its own logical DB, separate from cache/session (DB 1)
+        // and the queue (DB 0), so a cache-eviction policy or a `FLUSHDB`
+        // during an incident can never touch live sale counters, and vice
+        // versa. See REDIS_WORKPLAN.md Phase 6.
         'stock' => [
             'url' => env('REDIS_URL'),
             'host' => env('REDIS_HOST', '127.0.0.1'),
