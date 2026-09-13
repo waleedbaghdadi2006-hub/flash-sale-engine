@@ -99,19 +99,18 @@ Route::middleware(['auth:api', 'throttle:api'])->group(function () {
         Route::match(['put', 'patch'], '/{id}', [AddressController::class, 'update']);
         Route::delete('/{id}', [AddressController::class, 'destroy']);
     });
-    // Admin-only coupon management.
-    Route::prefix('admin/coupons')->middleware(['auth:api', 'role:admin', 'throttle:api'])->group(function () {
-        Route::get('/', [CouponController::class, 'index']);
-        Route::get('/{id}', [CouponController::class, 'show']);
-        Route::post('/', [CouponController::class, 'store']);
-        Route::match(['put', 'patch'], '/{id}', [CouponController::class, 'update']);
-        Route::delete('/{id}', [CouponController::class, 'destroy']);
-        Route::post('/{id}/toggle', [CouponController::class, 'toggle']);
-
-    });
 });
 
+// Admin-only coupon management.
+Route::prefix('admin/coupons')->middleware(['auth:api', 'role:admin', 'throttle:api'])->group(function () {
+    Route::get('/', [CouponController::class, 'index']);
+    Route::get('/{id}', [CouponController::class, 'show']);
+    Route::post('/', [CouponController::class, 'store']);
+    Route::match(['put', 'patch'], '/{id}', [CouponController::class, 'update']);
+    Route::delete('/{id}', [CouponController::class, 'destroy']);
+    Route::post('/{id}/toggle', [CouponController::class, 'toggle']);
 
+});
 
 // Async payment-gateway confirmations. Deliberately outside auth:api because
 // real gateways call this directly. Signature verification is intentionally

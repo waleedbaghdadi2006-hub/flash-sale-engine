@@ -38,6 +38,75 @@ services:
     networks:
       - backend
 
+  # Laravel Horizon — Redis queue supervisor + dashboard.
+  # Runs the same image as `app` but as a long-lived worker process instead
+  # of php-fpm. Replaces the (previously nonexistent) queue worker: before
+  # this, nothing in docker-compose actually processed the `redis` queue.
+  horizon:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: flash-sale-horizon
+    restart: unless-stopped
+    working_dir: /app
+    command: [ "php", "artisan", "horizon" ]
+    environment:
+      - DB_CONNECTION=mysql
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_DATABASE=flash_sale
+      - DB_USERNAME=root
+      - DB_PASSWORD=@123123asdasdF
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./app:/app
+      - ./app/storage:/app/storage
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "pgrep -f 'artisan horizon' > /dev/null || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - backend
+
+  # Laravel scheduler — runs `schedule:run` every minute inside the
+  # container so `horizon:snapshot` (config/horizon.php metrics) fires
+  # without needing a host crontab.
+  scheduler:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: flash-sale-scheduler
+    restart: unless-stopped
+    working_dir: /app
+    command: [ "php", "artisan", "schedule:work" ]
+    environment:
+      - DB_CONNECTION=mysql
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_DATABASE=flash_sale
+      - DB_USERNAME=root
+      - DB_PASSWORD=@123123asdasdF
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./app:/app
+      - ./app/storage:/app/storage
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+
   # MySQL Database
   mysql:
     image: mysql:8.0

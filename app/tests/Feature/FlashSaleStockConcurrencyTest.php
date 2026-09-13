@@ -37,26 +37,8 @@ class FlashSaleStockConcurrencyTest extends TestCase
 
         $pool = Process::pool(function (Pool $pool) use ($attempts, $flashSaleItemId) {
             for ($i = 0; $i < $attempts; $i++) {
-                $pool = Process::pool(function (Pool $pool) use ($attempts, $flashSaleItemId) {
-                    for ($i = 0; $i < $attempts; $i++) {
-                        $pool
-                            ->path(base_path())
-                            ->env([
-                                'APP_ENV' => 'testing',
-                                'REDIS_CLIENT' => 'phpredis',
-                                'REDIS_HOST' => 'redis',
-                                'REDIS_PORT' => '6379',
-                                'REDIS_STOCK_DB' => '2',
-                            ])
-                            ->command([
-                                PHP_BINARY,
-                                'artisan',
-                                'flash-sale:reserve-once',
-                                (string) $flashSaleItemId,
-                                '1',
-                            ]);
-                    }
-                })->start();
+                $pool->path(base_path())
+                    ->command(['php', 'artisan', 'flash-sale:reserve-once', (string) $flashSaleItemId, '1']);
             }
         })->start();
 

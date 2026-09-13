@@ -47,6 +47,10 @@ class ProcessFlashSalePurchase implements ShouldQueue
          */
         public readonly bool $reservedViaRedis = false,
     ) {
+        // Dedicated queue so flash-sale bursts are scaled (and alerted on)
+        // independently of the default queue's supervisor — see
+        // config/horizon.php's `supervisor-flash-sale`.
+        $this->onQueue('flash-sale');
     }
 
     public function handle(PurchaseService $purchaseService, FlashSaleStock $flashSaleStock): void

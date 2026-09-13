@@ -80,10 +80,7 @@ class FlashSaleStock
     public function seed(int $flashSaleItemId, int $remaining): void
     {
         try {
-            Redis::connection('stock')->setnx(
-                $this->key($flashSaleItemId),
-                $remaining
-            );
+            Redis::connection('stock')->command('SET', [$this->key($flashSaleItemId), $remaining, 'NX']);
         } catch (Throwable $e) {
             $this->logFailure('seed', $flashSaleItemId, $e);
         }
