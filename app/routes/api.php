@@ -109,7 +109,6 @@ Route::prefix('admin/coupons')->middleware(['auth:api', 'role:admin', 'throttle:
     Route::match(['put', 'patch'], '/{id}', [CouponController::class, 'update']);
     Route::delete('/{id}', [CouponController::class, 'destroy']);
     Route::post('/{id}/toggle', [CouponController::class, 'toggle']);
-
 });
 
 // Async payment-gateway confirmations. Deliberately outside auth:api because

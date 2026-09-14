@@ -29,4 +29,7 @@ return [
 
     'purchase_idempotency_ttl_seconds' => env('FLASH_SALE_PURCHASE_IDEMPOTENCY_TTL_SECONDS', 10),
 
+    'stock_broadcast_enabled' => env('FLASH_SALE_STOCK_BROADCAST_ENABLED', true),
+    'stock_broadcast_every' => max(1, (int) env('FLASH_SALE_STOCK_BROADCAST_EVERY', 1)),
+
 ];

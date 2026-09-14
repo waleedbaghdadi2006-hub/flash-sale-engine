@@ -20,7 +20,9 @@ class OrderService
 
     public function cancel(Order $order): Order
     {
-        return DB::transaction(function () use ($order) {
+        $flashSaleReleases = [];
+
+        $order = DB::transaction(function () use ($order, &$flashSaleReleases) {
             $order = Order::where('id', $order->id)->lockForUpdate()->firstOrFail();
 
             foreach ($order->items()->lockForUpdate()->get() as $item) {
@@ -40,14 +42,11 @@ class OrderService
                             'version' => $flashSaleItem->version + 1,
                         ]);
 
-                        // Give the cancelled unit(s) back to the live Redis
-                        // counter so they become purchasable again — unless
-                        // the sale has already ended, in which case the key
-                        // is simply left to expire/be cleaned up rather
-                        // than resurrected for a sale nobody can buy from
-                        // anymore.
                         if ($order->flashSale?->status !== FlashSale::STATUS_ENDED) {
-                            $this->flashSaleStock->release($flashSaleItem->id, $item->quantity);
+                            $flashSaleReleases[] = [
+                                'item' => $flashSaleItem,
+                                'quantity' => (int) $item->quantity,
+                            ];
                         }
 
                         continue;
@@ -74,5 +73,14 @@ class OrderService
 
             return $order;
         });
+
+        foreach ($flashSaleReleases as $release) {
+            /** @var FlashSaleItem $flashSaleItem */
+            $flashSaleItem = $release['item'];
+            $this->flashSaleStock->release($flashSaleItem->id, $release['quantity']);
+            $this->flashSaleStock->broadcastUpdated($flashSaleItem, 'released');
+        }
+
+        return $order;
     }
 }

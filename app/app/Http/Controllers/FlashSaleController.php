@@ -172,6 +172,10 @@ class FlashSaleController extends Controller
             }
 
             $reservedViaRedis = $reservation === FlashSaleStock::RESERVED;
+
+            if ($reservedViaRedis) {
+                $flashSaleStock->broadcastUpdated($flashSaleItem, 'reserved');
+            }
         }
 
         // Cheap, non-authoritative "obviously sold out" check. Only needed
@@ -220,6 +224,7 @@ class FlashSaleController extends Controller
 
             if ($reservedViaRedis) {
                 $flashSaleStock->release($flashSaleItem->id, $quantity);
+                $flashSaleStock->broadcastUpdated($flashSaleItem, 'released');
             }
 
             throw $e;

@@ -112,6 +112,10 @@ class ProcessFlashSalePurchase implements ShouldQueue
     {
         if ($this->reservedViaRedis) {
             $flashSaleStock->release($this->flashSaleItemId, $this->quantity);
+            $flashSaleItem = FlashSaleItem::find($this->flashSaleItemId);
+            if ($flashSaleItem) {
+                $flashSaleStock->broadcastUpdated($flashSaleItem, 'released');
+            }
         }
     }
 }
