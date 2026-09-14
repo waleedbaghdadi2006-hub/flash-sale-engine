@@ -27,4 +27,6 @@ return [
     */
     'redis_stock_enabled' => env('FLASH_SALE_REDIS_STOCK_ENABLED', true),
 
+    'purchase_idempotency_ttl_seconds' => env('FLASH_SALE_PURCHASE_IDEMPOTENCY_TTL_SECONDS', 10),
+
 ];

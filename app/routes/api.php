@@ -65,7 +65,7 @@ Route::prefix('flash-sales')->middleware('throttle:api')->group(function () {
     // Customer-facing purchase attempt — requires auth (purchase() calls
     // $request->user()) plus the flash_sale.active middleware your
     // controller's docblock calls out as a hard requirement.
-    Route::middleware(['auth:api', 'flash_sale.active'])->group(function () {
+    Route::middleware(['auth:api', 'throttle:flash_sale_purchase', 'flash_sale.active'])->group(function () {
         Route::post('/{flashSale}/purchase', [FlashSaleController::class, 'purchase']);
     });
 });

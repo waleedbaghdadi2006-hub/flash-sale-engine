@@ -41,5 +41,15 @@ class AppServiceProvider extends ServiceProvider
 
             return Limit::perMinute(120)->by((string) $key);
         });
+
+        RateLimiter::for('flash_sale_purchase', function (Request $request) {
+            $userId = $request->user()?->getAuthIdentifier() ?? 'guest';
+            $flashSale = $request->route('flashSale') ?? $request->route('flash_sale');
+            $flashSaleId = is_object($flashSale) && method_exists($flashSale, 'getKey')
+                ? $flashSale->getKey()
+                : (string) $flashSale;
+
+            return Limit::perMinute(5)->by((string) $userId . '|' . (string) $flashSaleId);
+        });
     }
 }

@@ -10,6 +10,7 @@ use App\Jobs\ProcessFlashSalePurchase;
 use App\Models\FlashSale;
 use App\Models\FlashSaleItem;
 use App\Services\FlashSaleStock;
+use App\Services\PurchaseIdempotencyGuard;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -109,7 +110,12 @@ class FlashSaleController extends Controller
      *
      * Route for this action must be behind the `flash_sale.active` middleware.
      */
-    public function purchase(PurchaseFlashSaleItemRequest $request, FlashSale $flashSale, FlashSaleStock $flashSaleStock): JsonResponse
+    public function purchase(
+        PurchaseFlashSaleItemRequest $request,
+        FlashSale $flashSale,
+        FlashSaleStock $flashSaleStock,
+        PurchaseIdempotencyGuard $idempotencyGuard,
+    ): JsonResponse
     {
         $flashSaleItem = FlashSaleItem::query()
             ->where('flash_sale_id', $flashSale->id)
@@ -117,6 +123,28 @@ class FlashSaleController extends Controller
             ->firstOrFail();
 
         $quantity = (int) $request->validated('quantity');
+        $userId = (int) $request->user()->id;
+        $shippingAddressId = (int) $request->validated('shipping_address_id');
+        $billingAddressId = $request->validated('billing_address_id');
+        $billingAddressId = $billingAddressId !== null ? (int) $billingAddressId : null;
+
+        // Claim the exact purchase intent before touching stock so a double
+        // submit/retry cannot reserve the same unit twice. The claim is
+        // deliberately released below if this request is sold out before
+        // anything is queued.
+        $idempotencyAcquired = $idempotencyGuard->tryAcquire(
+            userId: $userId,
+            flashSaleItemId: $flashSaleItem->id,
+            quantity: $quantity,
+            shippingAddressId: $shippingAddressId,
+            billingAddressId: $billingAddressId,
+        );
+
+        if (!$idempotencyAcquired) {
+            return response()->json([
+                'message' => 'This purchase request is already being processed.',
+            ], 409);
+        }
 
         // Did the Redis counter itself authoritatively decrement stock for
         // this request? Only true on a genuine RESERVED result — never on
@@ -130,6 +158,14 @@ class FlashSaleController extends Controller
             $reservation = $flashSaleStock->reserve($flashSaleItem, $quantity);
 
             if ($reservation === FlashSaleStock::SOLD_OUT) {
+                $idempotencyGuard->release(
+                    userId: $userId,
+                    flashSaleItemId: $flashSaleItem->id,
+                    quantity: $quantity,
+                    shippingAddressId: $shippingAddressId,
+                    billingAddressId: $billingAddressId,
+                );
+
                 return response()->json([
                     'message' => 'This item is sold out.',
                 ], 409);
@@ -143,6 +179,14 @@ class FlashSaleController extends Controller
         // (disabled or UNAVAILABLE) — the job re-checks authoritatively
         // against the DB before reserving anything either way.
         if (!$reservedViaRedis && $flashSaleItem->remainingStock() < $quantity) {
+            $idempotencyGuard->release(
+                userId: $userId,
+                flashSaleItemId: $flashSaleItem->id,
+                quantity: $quantity,
+                shippingAddressId: $shippingAddressId,
+                billingAddressId: $billingAddressId,
+            );
+
             return response()->json([
                 'message' => 'This item is sold out.',
             ], 409);
@@ -151,19 +195,35 @@ class FlashSaleController extends Controller
         $referenceId = (string) Str::uuid();
 
         Cache::put("flash_sale_purchase:{$referenceId}", [
-            'user_id' => $request->user()->id,
+            'user_id' => $userId,
             'status' => 'pending',
         ], now()->addMinutes(15));
 
-        ProcessFlashSalePurchase::dispatch(
-            referenceId: $referenceId,
-            userId: $request->user()->id,
-            flashSaleItemId: $flashSaleItem->id,
-            quantity: $quantity,
-            shippingAddressId: (int) $request->validated('shipping_address_id'),
-            billingAddressId: $request->validated('billing_address_id'),
-            reservedViaRedis: $reservedViaRedis,
-        );
+        try {
+            ProcessFlashSalePurchase::dispatch(
+                referenceId: $referenceId,
+                userId: $userId,
+                flashSaleItemId: $flashSaleItem->id,
+                quantity: $quantity,
+                shippingAddressId: $shippingAddressId,
+                billingAddressId: $billingAddressId,
+                reservedViaRedis: $reservedViaRedis,
+            );
+        } catch (\Throwable $e) {
+            $idempotencyGuard->release(
+                userId: $userId,
+                flashSaleItemId: $flashSaleItem->id,
+                quantity: $quantity,
+                shippingAddressId: $shippingAddressId,
+                billingAddressId: $billingAddressId,
+            );
+
+            if ($reservedViaRedis) {
+                $flashSaleStock->release($flashSaleItem->id, $quantity);
+            }
+
+            throw $e;
+        }
 
         return response()->json([
             'message' => 'Your purchase is being processed.',

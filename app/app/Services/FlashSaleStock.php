@@ -79,13 +79,32 @@ class FlashSaleStock
      */
     public function seed(int $flashSaleItemId, int $remaining): void
     {
+        $key = $this->key($flashSaleItemId);
+
         try {
-            Redis::connection('stock')->command('SET', [$this->key($flashSaleItemId), $remaining, 'NX']);
+            $result = Redis::connection('stock')->set(
+                $key,
+                $remaining,
+                null,
+                null,
+                'NX'
+            );
+
+            logger()->info('FlashSaleStock seed', [
+                'key' => $key,
+                'remaining' => $remaining,
+                'result' => $result,
+            ]);
         } catch (Throwable $e) {
-            $this->logFailure('seed', $flashSaleItemId, $e);
+            logger()->error('FlashSaleStock seed failed', [
+                'key' => $key,
+                'remaining' => $remaining,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw $e;
         }
     }
-
     /**
      * Raw primitive: -1 miss (not seeded), 0 sold out, 1 reserved.
      *
