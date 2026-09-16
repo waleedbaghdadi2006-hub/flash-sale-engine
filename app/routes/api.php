@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Admin\CouponController;
+use App\Http\Controllers\Admin\RedisHealthController;
 use App\Http\Controllers\AddressController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CartController;
@@ -110,6 +111,10 @@ Route::prefix('admin/coupons')->middleware(['auth:api', 'role:admin', 'throttle:
     Route::delete('/{id}', [CouponController::class, 'destroy']);
     Route::post('/{id}/toggle', [CouponController::class, 'toggle']);
 });
+
+// Admin-only Redis health/monitoring snapshot (REDIS_WORKPLAN.md Phase 6).
+Route::get('/admin/redis/health', RedisHealthController::class)
+    ->middleware(['auth:api', 'role:admin', 'throttle:api']);
 
 // Async payment-gateway confirmations. Deliberately outside auth:api because
 // real gateways call this directly. Signature verification is intentionally

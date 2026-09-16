@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Events\StockUpdated;
 use App\Models\FlashSaleItem;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
@@ -184,6 +185,108 @@ class FlashSaleStock
         } catch (Throwable $e) {
             $this->logFailure('release', $flashSaleItemId, $e);
         }
+    }
+
+    /**
+     * Broadcast a `StockUpdated` event for this item, per Phase 5.
+     *
+     * Never allowed to affect the purchase it's called from: every failure
+     * mode here (broadcasting disabled, Redis unreachable, Reverb down) is
+     * caught and logged rather than thrown, and callers must not
+     * (and don't) wrap this in anything that could turn a broadcast
+     * failure into a purchase failure.
+     *
+     * `'reserved'` events are throttled via `flash_sale.stock_broadcast_every`
+     * — a hot item can reserve hundreds of times a second and nobody needs
+     * a client-side counter to redraw on every single one. `'released'`
+     * events (cancellations, a DB reservation that failed after Redis said
+     * yes) always broadcast: they're rare, and a suppressed correction
+     * would leave connected clients showing less stock than truly remains.
+     */
+    public function broadcastUpdated(FlashSaleItem $flashSaleItem, string $reason = 'reserved'): void
+    {
+        if (!config('flash_sale.stock_broadcast_enabled')) {
+            return;
+        }
+
+        try {
+            if ($reason === 'reserved' && !$this->shouldBroadcastReservation($flashSaleItem->id)) {
+                return;
+            }
+
+            event(new StockUpdated(
+                flashSaleId: $flashSaleItem->flash_sale_id,
+                flashSaleItemId: $flashSaleItem->id,
+                remainingStock: $this->remainingStockFor($flashSaleItem),
+                reason: $reason,
+            ));
+        } catch (Throwable $e) {
+            Log::warning('FlashSaleStock: broadcastUpdated failed; live stock updates degraded, purchase unaffected.', [
+                'flash_sale_item_id' => $flashSaleItem->id,
+                'reason' => $reason,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Delete this item's Redis stock counter and its broadcast-throttle
+     * key. Called explicitly once a sale has ended (see
+     * `flash-sale:cleanup-stock`) — counters intentionally carry no TTL
+     * while a sale is live, so this is the only way they go away.
+     * Best-effort: a failure here just leaves a harmless stale key behind.
+     */
+    public function forget(int $flashSaleItemId): void
+    {
+        try {
+            Redis::connection('stock')->del([
+                $this->key($flashSaleItemId),
+                $this->broadcastThrottleKey($flashSaleItemId),
+            ]);
+        } catch (Throwable $e) {
+            $this->logFailure('forget', $flashSaleItemId, $e);
+        }
+    }
+
+    /**
+     * Every Nth 'reserved' event broadcasts, per
+     * `flash_sale.stock_broadcast_every`. Throwing here (e.g. Redis is
+     * down) is intentional — it's caught by broadcastUpdated()'s try/catch
+     * exactly like every other failure mode in this class.
+     */
+    private function shouldBroadcastReservation(int $flashSaleItemId): bool
+    {
+        $every = max(1, (int) config('flash_sale.stock_broadcast_every', 1));
+
+        $count = Redis::connection('stock')->incr($this->broadcastThrottleKey($flashSaleItemId));
+
+        return $count % $every === 0;
+    }
+
+    /**
+     * Best-effort "what's actually left" for the broadcast payload: prefer
+     * the live Redis counter (what buyers are actually racing against),
+     * falling back to the DB-authoritative value only when Redis has
+     * nothing for this item (disabled, unavailable, or never seeded — e.g.
+     * a 'released' correction from a cancellation on a sale that never
+     * used the Redis gatekeeper).
+     */
+    private function remainingStockFor(FlashSaleItem $flashSaleItem): int
+    {
+        $value = Redis::connection('stock')->get($this->key($flashSaleItem->id));
+
+        if ($value !== null && $value !== false) {
+            return (int) $value;
+        }
+
+        $fresh = $flashSaleItem->exists ? $flashSaleItem->fresh() : null;
+
+        return ($fresh ?? $flashSaleItem)->remainingStock();
+    }
+
+    private function broadcastThrottleKey(int $flashSaleItemId): string
+    {
+        return "flashsale:{$flashSaleItemId}:broadcast_throttle";
     }
 
     private function key(int $flashSaleItemId): string

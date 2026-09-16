@@ -146,13 +146,14 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: [ "CMD-SHELL", "pgrep -f 'artisan reverb:start' > /dev/null || exit 1" ]
+      test: [ "CMD-SHELL", "cat /proc/net/tcp | grep -i '00000000:1F90' > /dev/null || exit 1" ]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 15s
     networks:
       - backend
+
 
   # MySQL Database
   mysql:
@@ -179,7 +180,14 @@ services:
     image: redis:7-alpine
     container_name: flash-sale-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes
+    # noeviction (not allkeys-lru) because queue jobs and flash-sale stock
+    # counters live in this same instance and must never be silently
+    # evicted under memory pressure — an OOM error is loud and recoverable,
+    # a dropped queue job or stock counter is neither. See
+    # REDIS_WORKPLAN.md Phase 6. Override via REDIS_MAXMEMORY /
+    # REDIS_MAXMEMORY_POLICY in the root .env for a bigger instance or a
+    # deliberate policy change.
+    command: redis-server --appendonly yes --maxmemory ${REDIS_MAXMEMORY:-256mb} --maxmemory-policy ${REDIS_MAXMEMORY_POLICY:-noeviction}
     volumes:
       - redis_data:/data
     ports:
