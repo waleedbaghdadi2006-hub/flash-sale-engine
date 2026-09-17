@@ -51,3 +51,6 @@ docker-compose.override.yml
 *.sqlite*
 app/storage/*.key
 app/storage/pail
+
+# Local k6 staging credentials
+load-tests/tokens.json

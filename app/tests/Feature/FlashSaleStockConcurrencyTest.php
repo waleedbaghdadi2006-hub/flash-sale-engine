@@ -29,8 +29,11 @@ class FlashSaleStockConcurrencyTest extends TestCase
     {
         $flashSaleItemId = 900099; // namespaced test ID, distinct from FlashSaleStockTest's range
         $key = "flashsale:{$flashSaleItemId}:stock";
-        $seeded = 25;
-        $attempts = 100;
+        $seeded = (int) env('FLASH_SALE_CONCURRENCY_STOCK', 25);
+        $attempts = (int) env('FLASH_SALE_CONCURRENCY_ATTEMPTS', 100);
+
+        $this->assertGreaterThan(0, $seeded);
+        $this->assertGreaterThan($seeded, $attempts);
 
         Redis::connection('stock')->del($key);
         Redis::connection('stock')->set($key, $seeded);
@@ -42,7 +45,11 @@ class FlashSaleStockConcurrencyTest extends TestCase
             }
         })->start();
 
-        $results = $pool->wait();
+        try {
+            $results = $pool->wait();
+        } finally {
+            Redis::connection('stock')->del($key);
+        }
 
         $wins = 0;
         $soldOut = 0;
@@ -58,8 +65,6 @@ class FlashSaleStockConcurrencyTest extends TestCase
                 ),
             };
         }
-
-        Redis::connection('stock')->del($key);
 
         $this->assertSame($seeded, $wins, 'Exactly the seeded quantity should win a reservation — no overselling.');
         $this->assertSame($attempts - $seeded, $soldOut, 'Every remaining attempt should be a clean sold-out rejection.');
