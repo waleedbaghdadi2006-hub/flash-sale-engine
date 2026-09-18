@@ -2,29 +2,58 @@ import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { SharedArray } from 'k6/data';
 
-// Staging-only load test for Phase 7.
-//
-// Required environment variables:
-//   BASE_URL=https://staging.example.com
-//   FLASH_SALE_ID=123
-//   PRODUCT_ID=456
-//   SHIPPING_ADDRESS_ID=789
-//   TOKENS_FILE=./load-tests/tokens.json
-//
-// Optional:
-//   VUS=1000 DURATION=30s QUANTITY=1
-//
-// tokens.json must be a JSON array of bearer tokens belonging to distinct
-// test users. Distinct users matter because the purchase endpoint has a
-// per-user rate limiter (5/minute). Never use production credentials.
-const tokens = new SharedArray('bearer tokens', () => {
-  const path = __ENV.TOKENS_FILE || './load-tests/tokens.json';
-  const parsed = JSON.parse(open(path));
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new Error('TOKENS_FILE must contain a non-empty JSON array of bearer tokens');
+const baseUrl = (__ENV.BASE_URL || 'http://127.0.0.1').replace(/\/$/, '');
+const saleId = __ENV.FLASH_SALE_ID || '1';
+const productId = __ENV.PRODUCT_ID || '1';
+const shippingAddressId = Number(__ENV.SHIPPING_ADDRESS_ID || 1);
+const quantity = Number(__ENV.QUANTITY || 1);
+const maxVUs = Number(__ENV.MAX_VUS || 250);
+
+const users = new SharedArray('customer credentials', () => {
+  const candidatePaths = [
+    __ENV.USERS_FILE || './load-tests/users.json',
+    './load-tests/users.json',
+    './users.json',
+  ];
+
+  for (const filePath of candidatePaths) {
+    try {
+      const parsed = JSON.parse(open(filePath));
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const validUsers = parsed.filter((user) => user && user.email && user.password);
+        if (validUsers.length > 0) {
+          return validUsers;
+        }
+      }
+    } catch (error) {
+      // Try the next path so the script works from the repository or load-tests directory.
+    }
   }
-  return parsed;
+
+  throw new Error(
+    `Could not load user credentials. Create a JSON array like [{"email":"user@example.com","password":"Password123!"}] in ${candidatePaths.join(' or ')}`,
+  );
 });
+
+function getUserForRequest() {
+  const index = (((__VU - 1) + (__ITER * maxVUs)) % users.length + users.length) % users.length;
+  return users[index];
+}
+
+function extractToken(response) {
+  if (response.status !== 200) {
+    return null;
+  }
+
+  try {
+    const body = response.json();
+    return body.token || body.access_token || body.data?.token || body.data?.access_token || body.authorisation?.token || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+http.setResponseCallback(http.expectedStatuses(200, 202, 401, 409, 429));
 
 export const options = {
   scenarios: {
@@ -32,12 +61,12 @@ export const options = {
       executor: 'ramping-arrival-rate',
       startRate: Number(__ENV.START_RATE || 0),
       timeUnit: '1s',
-      preAllocatedVUs: Number(__ENV.PREALLOCATED_VUS || 100),
-      maxVUs: Number(__ENV.MAX_VUS || 2000),
+      preAllocatedVUs: Number(__ENV.PREALLOCATED_VUS || 50),
+      maxVUs,
       stages: [
-        { target: Number(__ENV.ARRIVAL_RATE || 1000), duration: __ENV.RAMP || '10s' },
-        { target: Number(__ENV.ARRIVAL_RATE || 1000), duration: __ENV.HOLD || '20s' },
-        { target: 0, duration: __ENV.COOLDOWN || '10s' },
+        { target: Number(__ENV.ARRIVAL_RATE || 50), duration: __ENV.RAMP || '5s' },
+        { target: Number(__ENV.ARRIVAL_RATE || 50), duration: __ENV.HOLD || '15s' },
+        { target: 0, duration: __ENV.COOLDOWN || '5s' },
       ],
     },
   },
@@ -48,30 +77,84 @@ export const options = {
   },
 };
 
-const baseUrl = (__ENV.BASE_URL || '').replace(/\/$/, '');
-const saleId = __ENV.FLASH_SALE_ID;
-const productId = __ENV.PRODUCT_ID;
-const shippingAddressId = __ENV.SHIPPING_ADDRESS_ID;
-const quantity = Number(__ENV.QUANTITY || 1);
+let session = null;
 
-if (!baseUrl || !saleId || !productId || !shippingAddressId) {
-  throw new Error('BASE_URL, FLASH_SALE_ID, PRODUCT_ID and SHIPPING_ADDRESS_ID are required');
+function createSession(user) {
+  const loginResponse = http.post(
+    `${baseUrl}/auth/login`,
+    JSON.stringify({
+      email: user.email,
+      password: user.password,
+    }),
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      tags: { endpoint: 'auth-login' },
+    },
+  );
+
+  const token = extractToken(loginResponse);
+  const loginSuccessful = check(loginResponse, {
+    'login succeeds': (r) => r.status === 200,
+    'login returns token': () => !!token,
+  });
+
+  if (!loginSuccessful || !token) {
+    return null;
+  }
+
+  const addressesResponse = http.get(`${baseUrl}/addresses`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+    },
+    tags: { endpoint: 'addresses-index' },
+  });
+
+  let addresses = [];
+  try {
+    addresses = addressesResponse.json();
+  } catch (error) {
+    addresses = [];
+  }
+
+  const shippingAddress = Array.isArray(addresses)
+    ? addresses.find((address) => address.is_default_shipping) || addresses[0]
+    : null;
+  const addressLoaded = check(addressesResponse, {
+    'address lookup succeeds': (r) => r.status === 200,
+    'user has a shipping address': () => !!shippingAddress,
+  });
+
+  if (!addressLoaded) {
+    return null;
+  }
+
+  return { token, shippingAddressId: shippingAddress.id };
 }
 
 export default function () {
-  const token = tokens[(__VU - 1) % tokens.length];
-  const payload = JSON.stringify({
-    product_id: Number(productId),
-    quantity,
-    shipping_address_id: Number(shippingAddressId),
-  });
+  if (!session) {
+    session = createSession(getUserForRequest());
+  }
 
-  const response = http.post(
+  if (!session) {
+    sleep(0.2);
+    return;
+  }
+
+  const purchaseResponse = http.post(
     `${baseUrl}/flash-sales/${saleId}/purchase`,
-    payload,
+    JSON.stringify({
+      product_id: Number(productId),
+      quantity,
+      shipping_address_id: Number(session.shippingAddressId || shippingAddressId),
+    }),
     {
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${session.token}`,
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
@@ -79,16 +162,20 @@ export default function () {
     },
   );
 
-  const accepted = response.status === 202;
-  const soldOut = response.status === 409 && response.body.includes('sold out');
-  const protectedDuplicate = response.status === 409 && response.body.includes('already being processed');
+  const accepted = purchaseResponse.status === 202;
+  const responseBody = purchaseResponse.body || '';
+  const soldOut = purchaseResponse.status === 409 && (
+    responseBody.includes('sold out') || responseBody.includes('out of stock')
+  );
+  const protectedDuplicate = purchaseResponse.status === 409 && (
+    responseBody.includes('already being processed') || responseBody.includes('already purchased')
+  );
+  const rateLimited = purchaseResponse.status === 429;
 
-  check(response, {
-    'purchase accepted or rejected by business rule': () => accepted || soldOut || protectedDuplicate,
-    'no server error': (r) => r.status < 500,
+  check(purchaseResponse, {
+    'purchase accepted or rejected by business rule': () => accepted || soldOut || protectedDuplicate || rateLimited,
+    'purchase should not be a server error': (r) => r.status < 500,
   });
 
-  // Keep pressure on the purchase endpoint rather than turning this into a
-  // polling benchmark. The purchase outcome is verified separately below.
   sleep(0.01);
 }

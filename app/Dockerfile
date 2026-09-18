@@ -18,6 +18,10 @@ RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 RUN docker-php-ext-install pdo_mysql mbstring exif pcntl posix bcmath gd
 #insatll redis extension
 RUN pecl install redis && docker-php-ext-enable redis
+# install OPcache
+RUN docker-php-ext-install pdo_mysql mbstring exif pcntl posix bcmath gd opcache
+COPY docker/php/opcache.ini /usr/local/etc/php/conf.d/opcache.ini
+
 # Get latest Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 

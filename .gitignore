@@ -26,6 +26,7 @@ app/storage/*
 !app/storage/app/public/.gitignore
 
 # Frontend & Dependencies
+node_modules/
 app/node_modules/
 app/vendor/
 app/public/build/
