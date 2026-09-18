@@ -4,13 +4,14 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Carbon;
 
 class FlashSale extends Model
 {
-    const STATUS_PENDING = 'pending';
-    const STATUS_ACTIVE = 'active';
-    const STATUS_ENDED = 'ended';
-    const STATUS_CANCELLED = 'cancelled';
+    public const STATUS_PENDING = 'pending';
+    public const STATUS_ACTIVE = 'active';
+    public const STATUS_ENDED = 'ended';
+    public const STATUS_CANCELLED = 'cancelled';
 
     protected $fillable = [
         'title',
@@ -27,7 +28,7 @@ class FlashSale extends Model
     public function isCurrentlyActive(): bool
     {
         return $this->status === self::STATUS_ACTIVE
-            && now()->between($this->starts_at, $this->ends_at);
+            && Carbon::now()->between($this->starts_at, $this->ends_at);
     }
 
     public function items(): HasMany

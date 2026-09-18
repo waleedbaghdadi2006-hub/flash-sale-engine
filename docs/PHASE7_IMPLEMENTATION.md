@@ -46,18 +46,20 @@ cp load-tests/tokens.example.json load-tests/tokens.json
 
 Populate it only with **staging test-user bearer tokens**. Never use production credentials.
 
-Example run:
+For local WSL runs, use the repository runner. It defaults to the local endpoint,
+the IDs above, and a conservative 50 RPS:
 
 ```bash
-k6 run \
-  -e BASE_URL=https://staging.example.com \
-  -e FLASH_SALE_ID=123 \
-  -e PRODUCT_ID=456 \
-  -e SHIPPING_ADDRESS_ID=789 \
-  -e TOKENS_FILE=./load-tests/tokens.json \
-  -e ARRIVAL_RATE=1000 \
-  -e MAX_VUS=2000 \
-  load-tests/flash-sale-purchase.js
+bash load-tests/run-flash-sale.sh
+```
+
+Override environment variables when targeting staging or increasing the rate:
+
+```bash
+BASE_URL=https://staging.example.com \
+FLASH_SALE_ID=123 PRODUCT_ID=456 SHIPPING_ADDRESS_ID=789 \
+ARRIVAL_RATE=1000 MAX_VUS=2000 \
+bash load-tests/run-flash-sale.sh
 ```
 
 The HTTP test checks that requests produce expected application outcomes (`202` accepted, or `409` for sold-out/duplicate protection) and that no `5xx` responses occur. It deliberately does **not** claim that HTTP responses alone prove order creation.

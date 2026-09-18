@@ -2,10 +2,10 @@ import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { SharedArray } from 'k6/data';
 
-const baseUrl = (__ENV.BASE_URL || 'http://127.0.0.1').replace(/\/$/, '');
+const baseUrl = (__ENV.BASE_URL || 'http://127.0.0.1:8000/api').replace(/\/$/, '');
 const saleId = __ENV.FLASH_SALE_ID || '1';
 const productId = __ENV.PRODUCT_ID || '1';
-const shippingAddressId = Number(__ENV.SHIPPING_ADDRESS_ID || 1);
+const shippingAddressId = __ENV.SHIPPING_ADDRESS_ID || '1';
 const quantity = Number(__ENV.QUANTITY || 1);
 const maxVUs = Number(__ENV.MAX_VUS || 250);
 
@@ -26,7 +26,7 @@ const users = new SharedArray('customer credentials', () => {
         }
       }
     } catch (error) {
-      // Try the next path so the script works from the repository or load-tests directory.
+      // Keep checking the next fallback path.
     }
   }
 
@@ -36,6 +36,8 @@ const users = new SharedArray('customer credentials', () => {
 });
 
 function getUserForRequest() {
+  // A VU keeps its identity across iterations. Striding by maxVUs gives each
+  // iteration a different user before the credential list wraps around.
   const index = (((__VU - 1) + (__ITER * maxVUs)) % users.length + users.length) % users.length;
   return users[index];
 }
@@ -53,7 +55,7 @@ function extractToken(response) {
   }
 }
 
-http.setResponseCallback(http.expectedStatuses(200, 202, 401, 409, 429));
+http.setResponseCallback(http.expectedStatuses(200, 202, 401, 409));
 
 export const options = {
   scenarios: {
@@ -77,9 +79,9 @@ export const options = {
   },
 };
 
-let session = null;
+export default function () {
+  const user = getUserForRequest();
 
-function createSession(user) {
   const loginResponse = http.post(
     `${baseUrl}/auth/login`,
     JSON.stringify({
@@ -102,45 +104,6 @@ function createSession(user) {
   });
 
   if (!loginSuccessful || !token) {
-    return null;
-  }
-
-  const addressesResponse = http.get(`${baseUrl}/addresses`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
-    },
-    tags: { endpoint: 'addresses-index' },
-  });
-
-  let addresses = [];
-  try {
-    addresses = addressesResponse.json();
-  } catch (error) {
-    addresses = [];
-  }
-
-  const shippingAddress = Array.isArray(addresses)
-    ? addresses.find((address) => address.is_default_shipping) || addresses[0]
-    : null;
-  const addressLoaded = check(addressesResponse, {
-    'address lookup succeeds': (r) => r.status === 200,
-    'user has a shipping address': () => !!shippingAddress,
-  });
-
-  if (!addressLoaded) {
-    return null;
-  }
-
-  return { token, shippingAddressId: shippingAddress.id };
-}
-
-export default function () {
-  if (!session) {
-    session = createSession(getUserForRequest());
-  }
-
-  if (!session) {
     sleep(0.2);
     return;
   }
@@ -150,11 +113,11 @@ export default function () {
     JSON.stringify({
       product_id: Number(productId),
       quantity,
-      shipping_address_id: Number(session.shippingAddressId || shippingAddressId),
+      shipping_address_id: Number(shippingAddressId),
     }),
     {
       headers: {
-        Authorization: `Bearer ${session.token}`,
+        Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
@@ -170,10 +133,9 @@ export default function () {
   const protectedDuplicate = purchaseResponse.status === 409 && (
     responseBody.includes('already being processed') || responseBody.includes('already purchased')
   );
-  const rateLimited = purchaseResponse.status === 429;
 
   check(purchaseResponse, {
-    'purchase accepted or rejected by business rule': () => accepted || soldOut || protectedDuplicate || rateLimited,
+    'purchase accepted or rejected by business rule': () => accepted || soldOut || protectedDuplicate,
     'purchase should not be a server error': (r) => r.status < 500,
   });
 

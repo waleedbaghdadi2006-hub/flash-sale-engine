@@ -36,6 +36,36 @@ class AppServiceProvider extends ServiceProvider
             return Limit::perMinute(10)->by($request->ip() . '|' . $email);
         });
 
+        RateLimiter::for('auth_login', function (Request $request) {
+            $email = strtolower(trim((string) $request->input('email')));
+
+            return $this->configuredLimit('auth_login')->by($request->ip() . '|' . $email);
+        });
+
+        RateLimiter::for('auth_register', function (Request $request) {
+            return $this->configuredLimit('auth_register')->by($request->ip());
+        });
+
+        RateLimiter::for('auth_verification', function (Request $request) {
+            return $this->configuredLimit('auth_verification')->by($request->ip());
+        });
+
+        RateLimiter::for('auth_forgot_password', function (Request $request) {
+            $email = strtolower(trim((string) $request->input('email')));
+
+            return $this->configuredLimit('auth_forgot_password')->by($request->ip() . '|' . $email);
+        });
+
+        RateLimiter::for('auth_reset_password', function (Request $request) {
+            return $this->configuredLimit('auth_reset_password')->by($request->ip());
+        });
+
+        RateLimiter::for('auth_refresh', function (Request $request) {
+            $key = $request->user()?->getAuthIdentifier() ?? $request->ip();
+
+            return $this->configuredLimit('auth_refresh')->by((string) $key);
+        });
+
         RateLimiter::for('api', function (Request $request) {
             $key = $request->user()?->getAuthIdentifier() ?? $request->ip();
 
@@ -49,7 +79,40 @@ class AppServiceProvider extends ServiceProvider
                 ? $flashSale->getKey()
                 : (string) $flashSale;
 
-            return Limit::perMinute(5)->by((string) $userId . '|' . (string) $flashSaleId);
+            return $this->configuredLimit('flash_sale_purchase')
+                ->by((string) $userId . '|' . (string) $flashSaleId);
         });
+
+        RateLimiter::for('cart_buy_now', function (Request $request) {
+            return $this->configuredLimit('cart_buy_now')->by($this->userKey($request));
+        });
+
+        RateLimiter::for('order_create', function (Request $request) {
+            return $this->configuredLimit('order_create')->by($this->userKey($request));
+        });
+
+        RateLimiter::for('payment_create', function (Request $request) {
+            return $this->configuredLimit('payment_create')->by($this->userKey($request));
+        });
+
+        RateLimiter::for('payment_webhook', function (Request $request) {
+            return $this->configuredLimit('payment_webhook')
+                ->by($request->ip() . '|' . (string) $request->route('provider'));
+        });
+    }
+
+    private function configuredLimit(string $name): Limit
+    {
+        $config = config('rate_limiting.' . $name);
+
+        return new Limit(
+            maxAttempts: (int) $config['max_attempts'],
+            decaySeconds: (int) $config['decay_seconds'],
+        );
+    }
+
+    private function userKey(Request $request): string
+    {
+        return (string) ($request->user()?->getAuthIdentifier() ?? $request->ip());
     }
 }

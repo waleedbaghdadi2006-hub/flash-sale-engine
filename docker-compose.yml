@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Laravel Application
   app:
@@ -19,6 +17,7 @@ services:
       - DB_PASSWORD=@123123asdasdF
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - FLASH_SALE_PURCHASE_RATE_LIMIT_ENABLED=false
     volumes:
       - ./app:/app
       - ./app/storage:/app/storage

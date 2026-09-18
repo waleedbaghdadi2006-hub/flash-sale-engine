@@ -15,13 +15,13 @@ use Illuminate\Support\Facades\Route;
 
 Route::get('/health', [HealthController::class, 'index']);
 
-Route::prefix('auth')->middleware('throttle:auth')->group(function () {
-    Route::post('/register', [AuthController::class, 'register']);
-    Route::post('/login', [AuthController::class, 'login']);
-    Route::post('/verify-email', [AuthController::class, 'verifyEmail']);
-    Route::post('/forgot-password', [AuthController::class, 'forgotPassword']);
-    Route::post('/reset-password', [AuthController::class, 'resetPassword']);
-    Route::post('/refresh', [AuthController::class, 'refresh']);
+Route::prefix('auth')->group(function () {
+    Route::post('/register', [AuthController::class, 'register'])->middleware('throttle:auth_register');
+    Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:auth_login');
+    Route::post('/verify-email', [AuthController::class, 'verifyEmail'])->middleware('throttle:auth_verification');
+    Route::post('/forgot-password', [AuthController::class, 'forgotPassword'])->middleware('throttle:auth_forgot_password');
+    Route::post('/reset-password', [AuthController::class, 'resetPassword'])->middleware('throttle:auth_reset_password');
+    Route::post('/refresh', [AuthController::class, 'refresh'])->middleware('throttle:auth_refresh');
 
     Route::middleware(['auth:api', 'throttle:api'])->group(function () {
         Route::get('/me', [AuthController::class, 'me']);
@@ -66,7 +66,12 @@ Route::prefix('flash-sales')->middleware('throttle:api')->group(function () {
     // Customer-facing purchase attempt — requires auth (purchase() calls
     // $request->user()) plus the flash_sale.active middleware your
     // controller's docblock calls out as a hard requirement.
-    Route::middleware(['auth:api', 'throttle:flash_sale_purchase', 'flash_sale.active'])->group(function () {
+    $purchaseMiddleware = ['auth:api', 'flash_sale.active'];
+    if (config('flash_sale.purchase_rate_limit_enabled', true)) {
+        $purchaseMiddleware[] = 'throttle:flash_sale_purchase';
+    }
+
+    Route::middleware($purchaseMiddleware)->group(function () {
         Route::post('/{flashSale}/purchase', [FlashSaleController::class, 'purchase']);
     });
 });
@@ -77,7 +82,7 @@ Route::middleware(['auth:api', 'throttle:api'])->group(function () {
     Route::prefix('cart')->group(function () {
         Route::get('/', [CartController::class, 'show']);
         Route::delete('/', [CartController::class, 'clear']);
-        Route::post('/buy-now', [CartController::class, 'buyNow']);
+        Route::post('/buy-now', [CartController::class, 'buyNow'])->middleware('throttle:cart_buy_now');
 
         Route::post('/items', [CartController::class, 'addItem']);
         Route::patch('/items/{item}', [CartController::class, 'updateItem']);
@@ -87,11 +92,11 @@ Route::middleware(['auth:api', 'throttle:api'])->group(function () {
     Route::prefix('orders')->group(function () {
         Route::get('/', [OrderController::class, 'index']);
         Route::get('/{id}', [OrderController::class, 'show']);
-        Route::post('/', [OrderController::class, 'store']);
+        Route::post('/', [OrderController::class, 'store'])->middleware('throttle:order_create');
         Route::post('/{id}/cancel', [OrderController::class, 'cancel']);
 
         Route::get('/{order}/payments', [PaymentController::class, 'index']);
-        Route::post('/{order}/payments', [PaymentController::class, 'store']);
+        Route::post('/{order}/payments', [PaymentController::class, 'store'])->middleware('throttle:payment_create');
     });
 
     Route::prefix('addresses')->group(function () {
@@ -119,4 +124,4 @@ Route::get('/admin/redis/health', RedisHealthController::class)
 // Async payment-gateway confirmations. Deliberately outside auth:api because
 // real gateways call this directly. Signature verification is intentionally
 // disabled outside local/test until a real provider integration is installed.
-Route::post('/webhooks/payments/{provider}', [PaymentWebhookController::class, 'handle'])->middleware('throttle:api');
+Route::post('/webhooks/payments/{provider}', [PaymentWebhookController::class, 'handle'])->middleware('throttle:payment_webhook');

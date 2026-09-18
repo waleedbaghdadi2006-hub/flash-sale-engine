@@ -14,6 +14,23 @@ Authorization: Bearer <access-token>
 
 The environment defines customer/admin/staff access and refresh-token variables, plus IDs for addresses, products, flash sales, purchases, and admin-created resources. fileciteturn0file1L66-L105
 
+## Rate limiting
+
+Sensitive endpoints use independent, per-minute limits. Defaults are configurable through environment variables and return HTTP `429` with Laravel's standard rate-limit headers when exceeded.
+
+| Endpoint group | Default limit | Key |
+| --- | ---: | --- |
+| `POST /auth/login` | 5 | IP + email |
+| `POST /auth/register` | 3 | IP |
+| Email verification / forgot password / reset password | 10 / 3 / 5 | IP / IP + email / IP |
+| `POST /auth/refresh` | 30 | User or IP |
+| `POST /flash-sales/{flashSale}/purchase` | 5 | User + flash sale |
+| `POST /cart/buy-now` / `POST /orders` | 10 | User or IP |
+| `POST /orders/{order}/payments` | 5 | User or IP |
+| `POST /webhooks/payments/{provider}` | 60 | IP + provider |
+
+The `RATE_LIMIT_*` variables in `app/.env.example` can tune each policy without code changes.
+
 ## Products
 
 ### List products
